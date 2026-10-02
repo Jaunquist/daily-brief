@@ -1,10 +1,9 @@
 {
   "_README": [
-    "Philippine indicators. PSA publishes no public API, so these are maintained here.",
+    "Philippine figures. PSA and the PSE publish no free API, so these are maintained here.",
     "Inflation lands ~the 5th of the following month; the Labour Force Survey ~the 8th.",
-    "Add the newest month to the END of each list. The chart shows the last 9 entries,",
-    "so you can leave older ones in place - they simply scroll off.",
-    "Sources: psa.gov.ph/price-indices/cpi-ir and psa.gov.ph/statistics/labor-force-survey"
+    "Append the newest month to the END of each series. Charts keep the last 9 entries.",
+    "Sources: psa.gov.ph/price-indices/cpi-ir, psa.gov.ph/statistics/labor-force-survey, pse.com.ph"
   ],
   "inflation": {
     "label": "Headline inflation, % year on year",
@@ -31,12 +30,18 @@
       ["2026-07", 6.0]
     ]
   },
+  "psei": {
+    "_note": "Update after the PH close. 'prev' is the session before, used for the day move.",
+    "close": 6247.11,
+    "prev": 6223.99,
+    "asof": "2026-10-01"
+  },
   "barista": {
-    "label": "Barista Index",
-    "note": "Fill in value/asof/blurb and this tile populates. Left empty it is hidden.",
-    "value": null,
-    "unit": "",
-    "asof": "",
-    "blurb": ""
+    "_note": "Minutes a barista must work to afford the cappuccino they just made.",
+    "cappuccino_php": 175,
+    "wage_daily_php": 755,
+    "hours_per_day": 8,
+    "wage_note": "NCR non-agricultural minimum, Wage Order NCR-28, effective 26 Sep 2026",
+    "price_note": "tall cappuccino, Metro Manila chain cafe"
   }
 }
