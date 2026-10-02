@@ -1,345 +1,364 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="robots" content="noindex, nofollow, noarchive">
-<meta name="theme-color" content="#0e1420">
-<meta name="color-scheme" content="dark">
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Daily Brief</title>
-
-<link rel="manifest" href="manifest.json">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Daily Brief">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='6' y='20' width='52' height='34' rx='5' fill='%232563eb'/%3E%3Cpath d='M24 20v-5a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v5' fill='none' stroke='%232563eb' stroke-width='4' stroke-linecap='round'/%3E%3Crect x='6' y='30' width='52' height='6' fill='%231e40af'/%3E%3Crect x='27' y='28' width='10' height='10' rx='2' fill='%23f8fafc'/%3E%3C/svg%3E">
 <style>
-*{box-sizing:border-box}
-html,body{height:100%}
-body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;
-  background:#0e1420;color:#e6edf6;
-  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  -webkit-font-smoothing:antialiased;padding:20px;
-  padding-top:max(20px,env(safe-area-inset-top));padding-bottom:max(20px,env(safe-area-inset-bottom))}
-.lock{width:100%;max-width:370px;background:#161e2c;border:1px solid #263144;
-  border-radius:16px;padding:30px 28px;text-align:center;
-  box-shadow:0 10px 40px rgba(0,0,0,.45)}
-.ico{width:52px;height:52px;margin:0 auto 16px;display:block}
-h1{font-size:19px;margin:0 0 5px;font-weight:600;letter-spacing:-.2px}
-.sub{color:#93a3b8;font-size:13px;margin-bottom:22px}
-input{width:100%;padding:11px 14px;font-size:17px;text-align:center;letter-spacing:.32em;
-  background:#0e1420;border:1px solid #2e3a4e;border-radius:10px;color:#e6edf6;
-  outline:none;font-family:inherit}
-input:focus{border-color:#3b82f6}
-input::placeholder{letter-spacing:.1em;color:#5b6b82}
-button{width:100%;margin-top:11px;padding:11px;font-size:15px;font-weight:600;
-  background:#2563eb;color:#fff;border:0;border-radius:10px;cursor:pointer;font-family:inherit}
-button:hover:not(:disabled){background:#1d4ed8}
-button:disabled{opacity:.55;cursor:default}
-#installBtn{background:transparent;color:#93a3b8;border:1px solid #2e3a4e;display:none}
-#installBtn:hover{color:#e6edf6;border-color:#3b82f6;background:transparent}
-.msg{margin-top:13px;font-size:12.5px;min-height:17px;color:#93a3b8}
-.msg.err{color:#f87171}
-.rem{display:flex;align-items:center;justify-content:center;gap:7px;margin-top:12px;
-  font-size:12.5px;color:#93a3b8;cursor:pointer;user-select:none}
-.rem input{width:auto;margin:0;cursor:pointer;accent-color:#2563eb}
-.foot{margin-top:20px;font-size:11px;color:#5b6b82;line-height:1.6}
-#view{position:fixed;inset:0;width:100%;height:100%;border:0;display:none;background:#0e1420;z-index:1}
-#chrome{position:fixed;right:14px;z-index:2147483647;display:none;flex-direction:column;gap:8px;align-items:flex-end;
-  bottom:max(14px,env(safe-area-inset-bottom))}
-#chrome button,#chrome .pill{width:auto;margin:0;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  background:#161e2c;color:#e6edf6;border:1px solid #2e3a4e;border-radius:999px;padding:9px 14px;cursor:pointer;opacity:.8;
-  box-shadow:0 4px 14px rgba(0,0,0,.4)}
-#chrome button:hover{opacity:1;border-color:#f87171;color:#f87171;background:#161e2c}
-#stale{display:none;cursor:default;border-color:#7a6a3a;color:#e3c884}
-#toast{position:fixed;left:50%;transform:translateX(-50%);top:max(14px,env(safe-area-inset-top));z-index:2147483647;
-  background:#161e2c;border:1px solid #2e3a4e;color:#e6edf6;border-radius:999px;padding:8px 16px;
-  font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:none;
-  box-shadow:0 4px 14px rgba(0,0,0,.4)}
-</style>
-</head>
-<body>
-<div class="lock" id="lock">
-  <svg class="ico" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-    <rect x="6" y="20" width="52" height="34" rx="5" fill="#2563eb"/>
-    <path d="M24 20v-5a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v5" fill="none" stroke="#2563eb" stroke-width="4" stroke-linecap="round"/>
-    <rect x="6" y="30" width="52" height="6" fill="#1e40af"/>
-    <rect x="27" y="28" width="10" height="10" rx="2" fill="#f8fafc"/>
-  </svg>
-  <h1>Daily Brief</h1>
-  <div class="sub">Enter your passcode to unlock.</div>
-  <form id="f" autocomplete="off">
-    <input id="pw" type="password" placeholder="Passcode"
-           autocomplete="current-password" aria-label="Passcode">
-    <button id="go" type="submit">Unlock</button>
-    <label class="rem"><input type="checkbox" id="rem"> Remember this device for 90 days</label>
-  </form>
-  <button id="installBtn" type="button">Install app</button>
-  <div class="msg" id="msg"></div>
-  <div class="foot">Contents are encrypted with AES-256-GCM.<br>Decrypted and decompressed entirely in your browser.
-    <br><span style="color:#7a6a3a">&ldquo;Remember&rdquo; stores the decryption key in this browser. Use only on
-    devices you control.</span></div>
+:root{color-scheme:light;--bg:#f6f7f9;--card:#fff;--ink:#1a2233;--muted:#66707f;--line:#e6e9ee;
+ --accent:#1f5eff;--up:#0a8f4d;--down:#d13b3b;--chip:#fbfcfe;
+ --t-ph:#e7f0ff;--t-mk:#e8f7ee;--t-cr:#fdeeee;--t-ai:#f3ecfd;--t-sp:#fff2e2;
+ --warn:#fff8e6;--warn-bd:#e9c46a;--warn-ink:#6b5518}
+[data-theme=dark]{color-scheme:dark;--bg:#12151c;--card:#1b2029;--ink:#e8ecf3;--muted:#9aa4b2;
+ --line:#2a313d;--accent:#6f9bff;--up:#4cc98a;--down:#f07a7a;--chip:#161b23;
+ --t-ph:#1d2c4d;--t-mk:#15342a;--t-cr:#402024;--t-ai:#2e2247;--t-sp:#3d2e15;
+ --warn:#2e2714;--warn-bd:#6b5518;--warn-ink:#e3c884}
+*{box-sizing:border-box;margin:0}
+body{font:15px/1.55 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+ background:var(--bg);color:var(--ink);padding:20px}
+.wrap{max-width:1080px;margin:0 auto}
+header{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+h1{font-size:22px} .sub{color:var(--muted);font-size:13px}
+#themeBtn{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:999px;
+ padding:6px 14px;font-size:13px;cursor:pointer}
+.grid{display:grid;gap:14px;margin-bottom:14px}
+.g3{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+#liveBadge{font-weight:600;color:var(--accent)}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px}
+.big{font-size:30px;font-weight:700} .muted{color:var(--muted);font-size:12.5px}
+.up{color:var(--up)} .down{color:var(--down)}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;
+ padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:7px 8px;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:none}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+ul.news{list-style:none} ul.news li{padding:7px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+ul.news li:last-child{border-bottom:none}
+.tag{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:999px;margin-right:6px}
+.t-ph{background:var(--t-ph);color:#5b8dff} .t-mk{background:var(--t-mk);color:#2fae6e}
+.t-cr{background:var(--t-cr);color:#e06a6a} .t-ai{background:var(--t-ai);color:#9a6cf5}
+.t-sp{background:var(--t-sp);color:#cf9a3c}
+.gwrap{display:flex;gap:22px;justify-content:space-around;flex-wrap:wrap}
+.gauge{text-align:center} .gauge .val{font-size:15px;font-weight:700}
+.gauge .lab{font-size:12.5px;color:var(--muted)}
+.impl{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:14px;
+ border-top:1px solid var(--line);padding-top:12px}
+.impl h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px}
+.impl ul{margin:0;padding-left:18px;font-size:13px;line-height:1.55}
+.idx{display:flex;gap:10px;flex-wrap:wrap}
+.idx .chip{flex:1 1 140px;background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.chip .n{font-size:12px;color:var(--muted)} .chip .v{font-size:17px;font-weight:700}
+.chip .c{font-size:12.5px;font-weight:600}
+.wx{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0 8px}
+.wx .slot{background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:8px 6px;text-align:center}
+.wx .t{font-size:11px;color:var(--muted);text-transform:uppercase} .wx .e{font-size:20px;margin:2px 0}
+.wx .d{font-size:14px;font-weight:700} .wx .r{font-size:11.5px;color:var(--muted)}
+.note{background:var(--warn);border:1px solid var(--warn-bd);color:var(--warn-ink);
+ border-radius:9px;padding:9px 12px;margin-top:11px;font-size:12.5px;line-height:1.5}
+.note ul{margin:4px 0 0;padding-left:16px} .note li{margin-bottom:3px}
+.chartblk{margin-bottom:12px}
+.chartblk h4{font-size:12px;font-weight:600;color:var(--muted);margin-bottom:2px}
+.chartblk .cap{font-size:11px;color:var(--muted);margin-top:1px}
+ul.news li a{color:inherit;text-decoration:none}
+ul.news li a:hover{color:var(--accent);text-decoration:underline}
+.ext{color:var(--muted);font-size:11px;margin-left:3px}
+.fcl{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:10px 0 5px}
+.fc5{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+.fc5 .d{background:var(--chip);border:1px solid var(--line);border-radius:8px;
+ padding:7px 2px;text-align:center;line-height:1.3}
+.fc5 .dn{font-size:9.5px;font-weight:700;color:var(--muted);text-transform:uppercase}
+.fc5 .de{font-size:17px;display:block;margin:2px 0}
+.fc5 .dt{font-size:11.5px;font-weight:700;white-space:nowrap}
+.fc5 .dr{font-size:9px;color:var(--muted);white-space:nowrap}
+@media (max-width:480px){.fc5 .mm{display:none}}
+details.coll{margin-top:11px;border-top:1px solid var(--line);padding-top:9px}
+details.coll>summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);
+ list-style:none;display:flex;justify-content:space-between;align-items:center}
+details.coll>summary::-webkit-details-marker{display:none}
+details.coll>summary::after{content:"BE";transition:transform .15s}
+details.coll[open]>summary::after{transform:rotate(180deg)}
+.newsgrid{display:grid;gap:0}
+.newsitem{padding:8px 0;border-bottom:1px solid var(--line);font-size:13.5px;line-height:1.45}
+.newsitem:last-child{border-bottom:none}
+.newsitem a{color:inherit;text-decoration:none;font-weight:600}
+.newsitem a:hover{color:var(--accent);text-decoration:underline}
+.fxrow{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+ padding:7px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+.fxrow:last-child{border-bottom:none}
+.fxrow .pair{color:var(--muted)}
+.fxrow .val{font-variant-numeric:tabular-nums;font-weight:600}
+.fxbig{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.fxbig .v{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums}
+footer{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}
+.gauge svg{max-width:100%;height:auto}
+@media (max-width:480px){
+ body{padding:12px}
+ .grid{gap:12px;margin-bottom:12px}
+ .card{padding:13px;overflow-x:auto}
+ h1{font-size:19px}
+ .big{font-size:26px}
+ table{font-size:12.5px}
+ td,th{padding:6px 5px}
+ .wx .slot{padding:7px 2px}
+ .wx .t,.wx .r{font-size:10px}
+ .idx .chip{flex:1 1 100%}
+ .impl{grid-template-columns:1fr;gap:10px}
+ .impl ul{padding-left:16px}
+ #themeBtn{padding:9px 15px}
+ footer{font-size:11px}
+}
+</style></head><body><div class="wrap">
+<header>
+ <div><h1>Good morning, Justin ☀️</h1>
+ <div class="sub">Friday, October 2, 2026 · Manila (PHT) · Morning edition 11:39 PM · <span id="liveBadge">…</span></div></div>
+ <button id="themeBtn" onclick="tt()">🌙 Dark</button>
+</header>
+
+<div class="grid g2">
+ <div class="card"><h2>⛅ Weather — Manila</h2>
+  <div><span class="big">28°C</span> &nbsp;Partly cloudy · Humidity 74%</div><div class="wx"><div class="slot"><div class="t">Morning</div><div class="e">☀️</div><div class="d">29°</div><div class="r">Clear · 8%</div></div><div class="slot"><div class="t">Afternoon</div><div class="e">⛅</div><div class="d">33°</div><div class="r">Cloudy · 53%</div></div><div class="slot"><div class="t">Evening</div><div class="e">🌧️</div><div class="d">28°</div><div class="r">Drizzle · 71%</div></div></div><details class="coll"><summary>Next 5 days &amp; outlook</summary><div class="fc5"><div class="d"><div class="dn">SAT 3</div><div class="dt"><span class="de">🌦️</span>26–32°</div><div class="dr">100%<span class="mm"> · 2.4mm</span></div></div><div class="d"><div class="dn">SUN 4</div><div class="dt"><span class="de">⛈️</span>25–32°</div><div class="dr">80%<span class="mm"> · 7.4mm</span></div></div><div class="d"><div class="dn">MON 5</div><div class="dt"><span class="de">🌦️</span>25–32°</div><div class="dr">80%<span class="mm"> · 0.8mm</span></div></div><div class="d"><div class="dn">TUE 6</div><div class="dt"><span class="de">⛈️</span>25–32°</div><div class="dr">96%<span class="mm"> · 13.6mm</span></div></div><div class="d"><div class="dn">WED 7</div><div class="dt"><span class="de">🌦️</span>24–31°</div><div class="dr">98%<span class="mm"> · 10.2mm</span></div></div></div><div class="note"><b>Outlook</b><ul><li>⛈️ Thunderstorms expected Sun and Tue.</li><li>🌧️ Heavy rain Sat, Tue and Wed — up to 14 mm in a day.</li><li>Open-Meteo carries no PAGASA bulletins — check PAGASA for LPAs and tropical cyclones.</li></ul></div></details></div>
+ <div class="card"><h2>📅 Today</h2>
+  <div class="muted">Calendar not configured — add the CALENDAR_ICS_URL secret to show your schedule here.</div></div>
 </div>
 
-<div id="chrome">
-  <div class="pill" id="stale"></div>
-  <button id="forgetBtn" type="button">&#128274; Lock &amp; forget device</button>
-</div>
-<div id="toast"></div>
+<div class="card" style="margin-bottom:14px"><h2>📰 News You Follow</h2>
+ <div class="newsgrid"><div class="newsitem"><span class="tag t-ph">PH</span><a href="https://www.google.com/search?q=BSP+holds" target="_blank" rel="noopener noreferrer">BSP holds<span class="ext">↗</span></a></div></div>
+ <div class="muted" style="margin-top:8px">Headlines open a Google search in a new tab.
+ Refreshed at each build — 6 AM and 6 PM PHT.</div></div>
 
+<div class="grid g2">
+ <div class="card"><h2>🌐 Global Snapshot</h2>
+  <div class="idx"><div class="chip"><div class="n">S&P 500</div><div class="v">7,601.20</div><div class="c"><span class="up">+0.81%</span></div></div><div class="chip"><div class="n">Nasdaq</div><div class="v">26,206.89</div><div class="c"><span class="up">+1.30%</span></div></div><div class="chip"><div class="n">PSEi</div><div class="v">6,301.44</div><div class="c"><span class="up">+0.37%</span></div></div><div class="chip"><div class="n">VIX</div><div class="v">15.84</div><div class="c"><span class="down">−6.30%</span></div></div></div>
+  <table style="margin-top:11px">
+   <tr><td>🇵🇭 BSP policy rate</td><td class="num"><b>4.50%</b> · hawkish bias</td></tr>
+   <tr><td>🇺🇸 Fed funds rate</td><td class="num"><b>3.50-3.75%</b> · hold expected</td></tr>
+   <tr><td>🇯🇵 BoJ policy rate</td><td class="num"><b>1.00%</b> · 31-yr high; +25bps seen by year-end</td></tr>
+   <tr><td>🇪🇺 ECB deposit rate</td><td class="num"><b>2.15%</b> · on hold</td></tr>
+   <tr><td>🇵🇭 PH inflation</td><td class="num"><b>6.1% (Aug)</b> · Sep print lands 5 Oct</td></tr>
+   <tr><td>🇵🇭 PH Q2 GDP</td><td class="num"><b>2.3%</b> · H1 growth 2.6%</td></tr>
+   <tr><td>🇺🇸 US CPI (y/y)</td><td class="num"><b>3.4% (Aug)</b> · unchanged on July</td></tr>
+   <tr><td>🇺🇸 US jobless claims</td><td class="num"><b>197k</b> · week to 26 Sep</td></tr>
+  </table>
+  <div class="note"><b>What changed</b><ul><li>S&P 500 7,601.20 from 7,543.55 (+57.65).</li><li>PSEi 6,301.44 from 6,247.11 (+54.33).</li></ul><div style="margin-top:6px"><b>Overall:</b> equities risk-on, volatility calm, crypto sentiment greedy at 74.</div></div>
+  <div class="muted" style="margin-top:8px">Indices are the last published close (FRED).
+  Policy rates are maintained in the builder config.</div>
+ </div>
+ <div class="card"><h2>🎯 Risk Gauges</h2>
+  <div class="gwrap">
+   <div class="gauge"><svg width="180" height="100" viewBox="0 0 180 100"><path d="M20.0,85.0 A70,70 0 0 1 54.4,24.7" stroke="#3fb46e" stroke-width="14" fill="none"/><path d="M54.4,24.7 A70,70 0 0 1 123.7,23.7" stroke="#f0b429" stroke-width="14" fill="none"/><path d="M123.7,23.7 A70,70 0 0 1 160.0,85.0" stroke="#d13b3b" stroke-width="14" fill="none"/><text x="90" y="69" text-anchor="middle" font-size="27" font-weight="700" fill="var(--ink)">19</text><text x="90" y="81" text-anchor="middle" font-size="9" fill="var(--muted)">/ 100</text><g transform="rotate(-55.0 90 85)"><line x1="90" y1="85" x2="90" y2="41" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/></g><circle cx="90" cy="85" r="4" fill="var(--ink)"/></svg>
+    <div class="val">Equities: LOW</div><div class="lab">VIX 15.84</div></div>
+   <div class="gauge" id="gauge-cr"><svg width="180" height="100" viewBox="0 0 180 100"><path d="M20.0,85.0 A70,70 0 0 1 40.5,35.5" stroke="#d13b3b" stroke-width="14" fill="none"/><path d="M40.5,35.5 A70,70 0 0 1 79.0,15.9" stroke="#f0b429" stroke-width="14" fill="none"/><path d="M79.0,15.9 A70,70 0 0 1 101.0,15.9" stroke="#9aa4b2" stroke-width="14" fill="none"/><path d="M101.0,15.9 A70,70 0 0 1 139.5,35.5" stroke="#8fd19e" stroke-width="14" fill="none"/><path d="M139.5,35.5 A70,70 0 0 1 160.0,85.0" stroke="#3fb46e" stroke-width="14" fill="none"/><text x="90" y="69" text-anchor="middle" font-size="27" font-weight="700" fill="var(--ink)">74</text><text x="90" y="81" text-anchor="middle" font-size="9" fill="var(--muted)">/ 100</text><g transform="rotate(43.2 90 85)"><line x1="90" y1="85" x2="90" y2="41" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/></g><circle cx="90" cy="85" r="4" fill="var(--ink)"/></svg>
+    <div class="val">Crypto: GREED (74)</div><div class="lab">Fear & Greed Index</div></div>
+  </div>
+  <div class="impl">
+   <div><h3>Equities — implications</h3><ul><li>Calm regime: staying invested and adding on dips is the standard playbook.</li><li>Volatility is cheap — a sensible time to buy protection, not sell it.</li><li>Complacency cuts both ways; keep stops honest rather than widening them.</li></ul></div>
+   <div><h3>Crypto — implications</h3><ul id="cr-bullets"><li><b>Main coins:</b> greed building — let winners run but start defining where you would take profit.</li><li><b>Alt coins:</b> this is where alts typically outperform; also where chasing gets expensive.</li><li><b>Meme coins:</b> rallies are fastest and shortest here — pre-commit an exit before entering.</li></ul></div>
+  </div>
+  <div class="muted" style="margin-top:10px">General directional reads from the gauges — not financial advice.</div>
+ </div>
+</div>
+
+<div class="grid g2">
+ <div class="card"><h2>💱 FX — Philippine Peso</h2>
+  <div class="fxbig"><div><div class="muted">USD / PHP</div><div class="v">62.81</div></div><div style="text-align:right"><span class="up">▼ 0.30%</span><div class="muted">vs previous fix</div></div></div>
+  <details class="coll"><summary>Other currencies</summary><div class="fxrow"><span class="pair">EUR / PHP</span><span><span class="val">70.97</span> &nbsp;<span class="up">▼ 0.30%</span></span></div><div class="fxrow"><span class="pair">JPY (100) / PHP</span><span><span class="val">39.75</span> &nbsp;<span class="up">▼ 0.30%</span></span></div></details>
+  <div class="muted" style="margin-top:8px">ECB reference fix 2026-10-01.
+  Green ▼ means the peso strengthened.</div></div>
+ <div class="card"><h2>🪙 Crypto</h2>
+  <table><tr><th>Coin</th><th class="num">USD (median)</th><th class="num">24h $</th>
+  <th class="num">24h %</th><th class="num">Src</th></tr><tr data-coin="BTC"><td><b>BTC</b> Bitcoin</td><td class="num" data-live="price">$86,500</td><td class="num" data-live="abs"><span class="up">+$2,633.41</span></td><td class="num" data-live="chg"><span class="up">+3.14%</span></td><td class="num" data-live="src" style="color:var(--muted);font-size:11.5px">3/3</td></tr><tr data-coin="ETH"><td><b>ETH</b> Ethereum</td><td class="num" data-live="price">—</td><td class="num" data-live="abs"><span class="muted">—</span></td><td class="num" data-live="chg">—</td><td class="num" data-live="src" style="color:var(--muted);font-size:11.5px">—</td></tr><tr data-coin="SOL"><td><b>SOL</b> Solana</td><td class="num" data-live="price">—</td><td class="num" data-live="abs"><span class="muted">—</span></td><td class="num" data-live="chg">—</td><td class="num" data-live="src" style="color:var(--muted);font-size:11.5px">—</td></tr><tr data-coin="BONK"><td><b>BONK</b> Bonk</td><td class="num" data-live="price">—</td><td class="num" data-live="abs"><span class="muted">—</span></td><td class="num" data-live="chg">—</td><td class="num" data-live="src" style="color:var(--muted);font-size:11.5px">—</td></tr><tr data-coin="JUP"><td><b>JUP</b> Jupiter</td><td class="num" data-live="price">$0.3378</td><td class="num" data-live="abs"><span class="up">+$0.00765927</span></td><td class="num" data-live="chg"><span class="up">+2.32%</span></td><td class="num" data-live="src" style="color:var(--muted);font-size:11.5px">2/3 · CB off</td></tr></table>
+  <div class="note"><b>What moved</b><ul><li><b>BTC $86,500</b>, up 3.14% on the day.</li><li>Breadth 2 of 2 higher · best BTC +3.14%, worst JUP +2.32%.</li><li>JUP priced on two sources — the third diverged by more than 25% and was discarded.</li><li>Fear &amp; Greed GREED (74).</li></ul></div>
+  <div class="muted" style="margin-top:8px">Median of Coinbase, CoinGecko and Binance.
+  A source more than 25% from the median is dropped and named under Src.</div></div>
+</div>
+
+<div class="grid g2">
+ <div class="card"><h2>🇵🇭 PH Indicators</h2><div class="chartblk"><h4>Headline inflation, % year on year</h4><svg viewBox="0 0 320 110" style="width:100%;height:auto" role="img" aria-label="bar chart"><rect x="0" y="51.5" width="320" height="20.2" fill="var(--up)" opacity=".12"/><rect x="6.4" y="73.8" width="22.8" height="18.2" rx="2" fill="var(--accent)"/><text x="17.8" y="71.3" text-anchor="middle" font-size="8.5" fill="var(--muted)">1.8</text><text x="17.8" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">Dec</text><rect x="42.0" y="71.8" width="22.8" height="20.2" rx="2" fill="var(--accent)"/><text x="53.3" y="69.3" text-anchor="middle" font-size="8.5" fill="var(--muted)">2</text><text x="53.3" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">Jan</text><rect x="77.5" y="67.7" width="22.8" height="24.3" rx="2" fill="var(--accent)"/><text x="88.9" y="65.2" text-anchor="middle" font-size="8.5" fill="var(--muted)">2.4</text><text x="88.9" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">Feb</text><rect x="113.1" y="50.5" width="22.8" height="41.5" rx="2" fill="var(--down)"/><text x="124.4" y="48.0" text-anchor="middle" font-size="8.5" fill="var(--muted)">4.1</text><text x="124.4" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">Mar</text><rect x="148.6" y="19.1" width="22.8" height="72.9" rx="2" fill="var(--down)"/><text x="160.0" y="16.6" text-anchor="middle" font-size="8.5" fill="var(--muted)">7.2</text><text x="160.0" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">Apr</text><rect x="184.2" y="23.2" width="22.8" height="68.8" rx="2" fill="var(--down)"/><text x="195.6" y="20.7" text-anchor="middle" font-size="8.5" fill="var(--muted)">6.8</text><text x="195.6" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">May</text><rect x="219.7" y="27.2" width="22.8" height="64.8" rx="2" fill="var(--down)"/><text x="231.1" y="24.7" text-anchor="middle" font-size="8.5" fill="var(--muted)">6.4</text><text x="231.1" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">Jun</text><rect x="255.3" y="29.2" width="22.8" height="62.8" rx="2" fill="var(--down)"/><text x="266.7" y="26.7" text-anchor="middle" font-size="8.5" fill="var(--muted)">6.2</text><text x="266.7" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">Jul</text><rect x="290.8" y="30.3" width="22.8" height="61.7" rx="2" fill="var(--down)"/><text x="302.2" y="27.8" text-anchor="middle" font-size="8.5" fill="var(--muted)">6.1</text><text x="302.2" y="104.0" text-anchor="middle" font-size="8" fill="var(--muted)">Aug</text></svg><div class="cap">Shaded band is the BSP 2–4% target. Red bars are prints above it.</div></div><div class="chartblk"><h4>Unemployment rate, %</h4><svg viewBox="0 0 320 96" style="width:100%;height:auto" role="img" aria-label="line chart"><polyline points="0.0,78.0 106.7,72.8 213.3,67.5 320.0,10.0" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/><circle cx="0.0" cy="78.0" r="2.6" fill="var(--accent)"/><text x="0.0" y="72.0" text-anchor="middle" font-size="8.5" fill="var(--muted)">4.7</text><text x="0.0" y="91.0" text-anchor="middle" font-size="8" fill="var(--muted)">Apr</text><circle cx="106.7" cy="72.8" r="2.6" fill="var(--accent)"/><text x="106.7" y="66.8" text-anchor="middle" font-size="8.5" fill="var(--muted)">4.8</text><text x="106.7" y="91.0" text-anchor="middle" font-size="8" fill="var(--muted)">May</text><circle cx="213.3" cy="67.5" r="2.6" fill="var(--accent)"/><text x="213.3" y="61.5" text-anchor="middle" font-size="8.5" fill="var(--muted)">4.9</text><text x="213.3" y="91.0" text-anchor="middle" font-size="8" fill="var(--muted)">Jun</text><circle cx="320.0" cy="10.0" r="2.6" fill="var(--accent)"/><text x="320.0" y="4.0" text-anchor="middle" font-size="8.5" fill="var(--muted)">6</text><text x="320.0" y="91.0" text-anchor="middle" font-size="8" fill="var(--muted)">Jul</text></svg><div class="cap">PSA Labour Force Survey.</div></div><div class="chartblk"><h4>☕ Barista Index</h4><div class="fxbig"><div><div class="v">111<span style="font-size:15px;font-weight:600"> min</span></div><div class="muted">1h 51m of work</div></div></div><div class="cap">Minutes a barista on the NCR minimum wage must work to afford the cappuccino they just made — ₱175 against ₱94.38 an hour.<br>NCR non-agricultural minimum, Wage Order NCR-28, effective 26 Sep 2026; tall cappuccino, Metro Manila chain cafe.</div></div></div>
+ <div class="card"><h2>📈 Portfolio</h2><div class="muted">Portfolio not configured — add the GOOGLE_SA_JSON and SHEET_ID secrets, and share the sheet with the service account.</div></div>
+</div>
+
+<footer>Sources: Open-Meteo, FRED, Frankfurter (ECB), Coinbase, CoinGecko, Binance,
+alternative.me, PSA (via ph_data.json), Google News.
+Rebuilt automatically each morning at 7:30 AM PHT by GitHub Actions.</footer>
+</div>
 <script>
-/* ---------- config ---------- */
-var GIST = '0d760e83001c29c6333f75cef619a7fe';
-var API  = 'https://api.github.com/gists/' + GIST;
+function ap(t){document.documentElement.setAttribute('data-theme',t);
+ document.getElementById('themeBtn').textContent=t==='dark'?'☀️ Light':'🌙 Dark';
+ try{parent.postMessage({dailyBriefTheme:t},'*')}catch(e){}}
+function tt(){var t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';
+ try{localStorage.setItem('briefing-theme',t)}catch(e){} ap(t);}
+try{ap(localStorage.getItem('briefing-theme')||'light')}catch(e){ap('light')}
+</script>
+<script>
+(function(){
+var COINS=['BTC','ETH','SOL','BONK','JUP'];
+var FXC=['USD','EUR','JPY','GBP','SGD','AUD','CNY','HKD'];
+var CRB={"ef": ["<b>Main coins (BTC/ETH):</b> extreme fear has historically been an accumulation zone \u2014 scale in slowly rather than all at once.", "<b>Alt coins (SOL/JUP):</b> highest beta in fear regimes \u2014 cut leverage and trim position size until sentiment recovers past ~40.", "<b>Meme coins (BONK):</b> most fragile in risk-off tape \u2014 keep the allocation small and take profits quickly."], "f": ["<b>Main coins:</b> fear without capitulation \u2014 continue scheduled buys, resist the urge to time the exact bottom.", "<b>Alt coins:</b> wait for BTC to stabilise before rotating out of majors; alts usually lag the turn.", "<b>Meme coins:</b> thin liquidity here \u2014 treat any position as speculative and sized to lose."], "n": ["<b>Main coins:</b> neutral tape \u2014 no edge from sentiment; stick to your plan.", "<b>Alt coins:</b> stock-picking matters more than beta in this zone; favour names with real volume.", "<b>Meme coins:</b> no sentiment tailwind \u2014 nothing here demands action."], "g": ["<b>Main coins:</b> greed building \u2014 let winners run but start defining where you would take profit.", "<b>Alt coins:</b> this is where alts typically outperform; also where chasing gets expensive.", "<b>Meme coins:</b> rallies are fastest and shortest here \u2014 pre-commit an exit before entering."], "eg": ["<b>Main coins:</b> extreme greed historically precedes drawdowns \u2014 consider trimming into strength.", "<b>Alt coins:</b> late-cycle behaviour; tighten stops and bank partial profits.", "<b>Meme coins:</b> maximum froth \u2014 the worst risk/reward of the three buckets."]};
+var CRZ=[[25,'#d13b3b'],[45,'#f0b429'],[55,'#9aa4b2'],[75,'#8fd19e'],[100,'#3fb46e']];
+var ok=0, LIVEPX={}, LIVECHG={};
 
-/* ---------- state ---------- */
-var cached = null;          // base64 payload text
-var liveKey = null;         // CryptoKey held in memory for silent refresh
-var editionStamp = null;    // gist updated_at
-var servedOffline = false;
-var lastCheck = 0, CHECK_AFTER = 600000;
-
-var msg = document.getElementById('msg');
-var pw  = document.getElementById('pw');
-var go  = document.getElementById('go');
-
-function say(t, isErr){ msg.textContent = t; msg.className = isErr ? 'msg err' : 'msg'; }
-
-function toast(t){
-  var el = document.getElementById('toast');
-  el.textContent = t; el.style.display = 'block';
-  setTimeout(function(){ el.style.display = 'none'; }, 2600);
+function money(v){
+  v = (typeof v === 'number') ? v : parseFloat(v);
+  if(v==null||isNaN(v)) return '\u2014';
+  // en-US explicitly: the device locale would otherwise swap , and . in prices
+  if(v>=1000) return '$'+v.toLocaleString('en-US',{maximumFractionDigits:0});
+  if(v>=1) return '$'+v.toFixed(2);
+  return '$'+v.toFixed(8).replace(/0+$/,'');
 }
-
-/* ---------- status bar follows the briefing's theme (Android standalone) ---------- */
-window.addEventListener('message', function(e){
-  var d = e && e.data;
-  if (!d || !d.dailyBriefTheme) return;
-  var m = document.querySelector('meta[name="theme-color"]');
-  if (m) m.setAttribute('content', d.dailyBriefTheme === 'dark' ? '#12151c' : '#f6f7f9');
-});
-
-/* ---------- service worker ---------- */
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', function(){
-    navigator.serviceWorker.register('sw.js').catch(function(){});
-  });
+function pct(v){
+  if(v==null||isNaN(v)) return '<span class="muted">\u2014</span>';
+  return '<span class="'+(v>=0?'up':'down')+'">'+(v>=0?'+':'\u2212')+Math.abs(v).toFixed(2)+'%</span>';
 }
+function badge(t){ var e=document.getElementById('liveBadge'); if(e) e.textContent=t; }
 
-/* ---------- install prompt ---------- */
-var deferredPrompt = null;
-window.addEventListener('beforeinstallprompt', function(e){
-  e.preventDefault();
-  deferredPrompt = e;
-  var b = document.getElementById('installBtn');
-  b.style.display = 'block';
-  b.onclick = function(){
-    b.style.display = 'none';
-    deferredPrompt.prompt();
-    deferredPrompt = null;
-  };
-});
-window.addEventListener('appinstalled', function(){
-  var b = document.getElementById('installBtn'); if (b) b.style.display = 'none';
-});
+var CG_IDS={BTC:'bitcoin',ETH:'ethereum',SOL:'solana',BONK:'bonk',JUP:'jupiter-exchange-solana'};
+var TOL=0.25;
 
-/* ---------- payload ---------- */
-async function getPayload(force){
-  if (cached && !force) return cached;
-  var r = await fetch(API, {
-    headers: { 'Accept': 'application/vnd.github+json' }, cache: 'no-cache'
-  });
-  if (!r.ok) throw new Error('Could not reach the gist (HTTP ' + r.status + ').');
-  servedOffline = r.headers.get('X-Daily-Brief-Offline') === '1';
-  var j = await r.json();
-  try { editionStamp = j.updated_at; } catch(e){}
-  var fl = j.files && j.files['payload.txt'];
-  if (!fl) throw new Error('payload.txt is missing from the gist.');
-  var txt = fl.content;
-  if (fl.truncated || !txt) txt = await (await fetch(fl.raw_url, {cache:'no-cache'})).text();
-  cached = txt.trim();
-  return cached;
-}
+function median(a){ a=a.slice().sort(function(x,y){return x-y;}); var m=a.length>>1;
+  return a.length%2 ? a[m] : (a[m-1]+a[m])/2; }
 
-function b64ToBytes(b64){
-  var bin = atob(b64);
-  var out = new Uint8Array(bin.length);
-  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+async function cbAll(){
+  var y=new Date(Date.now()-86400000).toISOString().slice(0,10), out={};
+  await Promise.all(COINS.map(async function(sym){
+    try{
+      var a=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot',{cache:'no-store'});
+      if(!a.ok) return;
+      var px=parseFloat((await a.json()).data.amount), ch=null;
+      try{
+        var b=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot?date='+y,{cache:'no-store'});
+        if(b.ok){ var p=parseFloat((await b.json()).data.amount); if(p) ch=(px-p)/p*100; }
+      }catch(e){}
+      if(!isNaN(px)) out[sym]=[px,ch];
+    }catch(e){}
+  }));
   return out;
 }
-function b64FromBytes(b){
-  var s=''; var a=new Uint8Array(b);
-  for(var i=0;i<a.length;i++) s+=String.fromCharCode(a[i]);
-  return btoa(s);
-}
 
-var K_KEY='briefing-device-key', K_EXP='briefing-device-exp';
-var DAYS90 = 90*24*60*60*1000;
-
-function forgetDevice(){
-  try{ localStorage.removeItem(K_KEY); localStorage.removeItem(K_EXP); }catch(e){}
-}
-function storedKeyB64(){
+async function cgAll(){
+  var out={};
   try{
-    var exp=parseInt(localStorage.getItem(K_EXP)||'0',10);
-    if(!exp || Date.now()>exp){ forgetDevice(); return null; }
-    return localStorage.getItem(K_KEY);
-  }catch(e){ return null; }
+    var ids=COINS.map(function(c){return CG_IDS[c];}).join(',');
+    var r=await fetch('https://api.coingecko.com/api/v3/simple/price?ids='+ids+
+                      '&vs_currencies=usd&include_24hr_change=true',{cache:'no-store'});
+    if(!r.ok) return out;
+    var j=await r.json();
+    COINS.forEach(function(sym){
+      var d=j[CG_IDS[sym]];
+      if(d&&d.usd) out[sym]=[d.usd, (d.usd_24h_change==null?null:d.usd_24h_change)];
+    });
+  }catch(e){}
+  return out;
 }
 
-async function toHtml(buf){
-  var b = new Uint8Array(buf);
-  if (b.length>2 && b[0]===0x1f && b[1]===0x8b) {
-    if (typeof DecompressionStream === 'undefined')
-      throw new Error('This browser cannot decompress the briefing. Please use a current browser.');
-    var st = new Blob([b]).stream().pipeThrough(new DecompressionStream('gzip'));
-    return await new Response(st).text();
-  }
-  return new TextDecoder().decode(b);
-}
-
-async function decryptWith(keyObj){
-  var raw = b64ToBytes(await getPayload());
-  if (raw.length < 29) throw new Error('Payload looks malformed.');
-  var iv = raw.subarray(16, 28), body = raw.subarray(28);
-  var plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv: iv }, keyObj, body);
-  return await toHtml(plain);
-}
-
-async function unlock(pass){
-  var raw = b64ToBytes(await getPayload());
-  if (raw.length < 29) throw new Error('Payload looks malformed.');
-  var salt = raw.subarray(0, 16);
-  var iv   = raw.subarray(16, 28);
-  var body = raw.subarray(28);
-
-  var km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
-  var key = await crypto.subtle.deriveKey(
-    { name:'PBKDF2', salt: salt, iterations: 600000, hash:'SHA-256' },
-    km, { name:'AES-GCM', length:256 }, true, ['decrypt']
-  );
-  var plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv: iv }, key, body);
-
-  liveKey = key;
-  if (document.getElementById('rem') && document.getElementById('rem').checked) {
+async function bnAll(){
+  var out={};
+  var syms=encodeURIComponent(JSON.stringify(COINS.map(function(c){return c+'USDT';})));
+  for (const host of ['https://data-api.binance.vision','https://api.binance.com']) {
     try{
-      var rawKey = await crypto.subtle.exportKey('raw', key);
-      localStorage.setItem(K_KEY, b64FromBytes(rawKey));
-      localStorage.setItem(K_EXP, String(Date.now() + DAYS90));
+      var r=await fetch(host+'/api/v3/ticker/24hr?symbols='+syms,{cache:'no-store'});
+      if(!r.ok) continue;
+      (await r.json()).forEach(function(row){
+        var sym=row.symbol.replace(/USDT$/,'');
+        if(COINS.indexOf(sym)>=0) out[sym]=[parseFloat(row.lastPrice), parseFloat(row.priceChangePercent)];
+      });
+      if(Object.keys(out).length) return out;
     }catch(e){}
   }
-  return await toHtml(plain);
+  return out;
 }
 
-/* ---------- render ---------- */
-function render(html){
-  var fr = document.getElementById('view');
-  if (!fr) {
-    fr = document.createElement('iframe');
-    fr.id = 'view';
-    fr.setAttribute('title', 'Daily Brief');
-    document.body.appendChild(fr);
-  }
-  fr.srcdoc = html;
-  fr.style.display = 'block';
-  document.getElementById('lock').style.display = 'none';
-  document.body.style.padding = '0';
-  document.getElementById('chrome').style.display = 'flex';
-  updateStale();
+async function doCrypto(){
+  var feeds;
+  try{ feeds = {CB: await cbAll(), CG: await cgAll(), BN: await bnAll()}; }
+  catch(e){ return; }
+  var any=false;
+  COINS.forEach(function(sym){
+    var q={};
+    Object.keys(feeds).forEach(function(k){ if(feeds[k][sym]) q[k]=feeds[k][sym]; });
+    var names=Object.keys(q);
+    if(!names.length) return;
+    var med=median(names.map(function(k){return q[k][0];}));
+    var kept=[], dropped=[];
+    names.forEach(function(k){
+      if(med && Math.abs(q[k][0]-med)/med > TOL) dropped.push(k); else kept.push(k);
+    });
+    if(!kept.length){ kept=names; dropped=[]; }
+    var px=median(kept.map(function(k){return q[k][0];}));
+    var chs=kept.map(function(k){return q[k][1];}).filter(function(v){return v!=null&&!isNaN(v);});
+    var ch=chs.length?median(chs):null;
+    LIVEPX[sym]=px; LIVECHG[sym]=ch; any=true;
+    var row=document.querySelector('tr[data-coin="'+sym+'"]'); if(!row) return;
+    var a=row.querySelector('[data-live=price]'), b=row.querySelector('[data-live=chg]'),
+        c=row.querySelector('[data-live=src]');
+    if(a) a.textContent=money(px);
+    if(b) b.innerHTML=pct(ch);
+    if(c) c.textContent=kept.length+'/'+names.length+(dropped.length?' · '+dropped.join('+')+' off':'');
+  });
+  if(any) ok++;
+  try{ revaluePortfolio(); }catch(e){}
 }
 
-function updateStale(){
-  var el = document.getElementById('stale');
-  if (!el) return;
-  var showOffline = servedOffline || !navigator.onLine;
-  if (!showOffline) { el.style.display = 'none'; return; }
-  var when = '';
-  if (editionStamp) {
-    var age = Date.now() - new Date(editionStamp).getTime();
-    var hrs = Math.floor(age/3600000);
-    when = hrs < 1 ? 'just now' : (hrs < 24 ? hrs + 'h ago' : Math.floor(hrs/24) + 'd ago');
-    when = ' — updated ' + when;
-  }
-  el.textContent = '⚡ Offline' + when;
-  el.style.display = 'block';
-}
-window.addEventListener('online',  updateStale);
-window.addEventListener('offline', updateStale);
-
-document.getElementById('forgetBtn').onclick = function(){
-  forgetDevice();
-  liveKey = null;
-  location.reload();
-};
-
-/* ---------- freshness: refresh in place, no re-prompt ---------- */
-async function checkFresh(){
-  if (!liveKey) return;
-  if (document.visibilityState !== 'visible') return;
-  if (Date.now() - lastCheck < CHECK_AFTER) return;
-  lastCheck = Date.now();
-  try {
-    var r = await fetch(API, { headers: {'Accept':'application/vnd.github+json'}, cache: 'no-cache' });
-    if (!r.ok) return;
-    servedOffline = r.headers.get('X-Daily-Brief-Offline') === '1';
-    var j = await r.json();
-    if (j && j.updated_at && j.updated_at !== editionStamp) {
-      cached = null;
-      var html = await decryptWith(liveKey);
-      render(html);
-      toast('New edition loaded');
-    } else {
-      updateStale();
-    }
-  } catch(e){ updateStale(); }
-}
-window.addEventListener('focus', checkFresh);
-window.addEventListener('pageshow', checkFresh);
-document.addEventListener('visibilitychange', checkFresh);
-
-/* ---------- entry points ---------- */
-document.getElementById('f').addEventListener('submit', async function(e){
-  e.preventDefault();
-  var pass = pw.value;
-  if (!pass) { say('Enter your passcode.', true); return; }
-  go.disabled = true; pw.disabled = true;
-  say('Fetching and decrypting…');
-  try {
-    var html = await unlock(pass);
-    say('Unlocked.');
-    lastCheck = Date.now();
-    render(html);
-  } catch (err) {
-    var net = /gist|payload|HTTP|Failed to fetch|NetworkError/i.test(err && err.message || '');
-    say(net ? (err.message || 'Network error.') : 'Incorrect passcode.', true);
-    go.disabled = false; pw.disabled = false;
-    pw.value = ''; pw.focus();
-  }
-});
-
-(async function tryDevice(){
-  var b64 = storedKeyB64();
-  if(!b64) { pw.focus(); getPayload().catch(function(){}); return; }
-  say('Verified device — unlocking…');
-  go.disabled = true; pw.disabled = true;
+async function doFx(){
   try{
-    var kb = b64ToBytes(b64);
-    var key = await crypto.subtle.importKey('raw', kb, {name:'AES-GCM'}, true, ['decrypt']);
-    var html = await decryptWith(key);
-    liveKey = key;
-    lastCheck = Date.now();
-    render(html);
-    var left = Math.ceil((parseInt(localStorage.getItem(K_EXP),10) - Date.now())/86400000);
-    var fb = document.getElementById('forgetBtn');
-    if (fb) fb.title = 'Device remembered for ' + left + ' more day' + (left===1?'':'s');
-  }catch(e){
-    forgetDevice();
-    say('Saved device key no longer works — enter your passcode.', true);
-    go.disabled = false; pw.disabled = false; pw.focus();
-  }
+    var r=await fetch('https://api.frankfurter.app/latest?from=PHP&to='+FXC.join(','),{cache:'no-store'});
+    if(!r.ok) throw new Error('fx');
+    var rates=(await r.json()).rates;
+    FXC.forEach(function(k){
+      var v=rates[k]; if(!v) return;
+      var php=1/v; if(k==='JPY') php*=100;
+      var el=document.querySelector('[data-fx="'+k+'"]');
+      if(el) el.textContent=php.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    });
+    ok++;
+  }catch(e){}
+}
+
+function gaugeSvg(score){
+  var cx=90,cy=85,r=70,segs='',frm=0;
+  function pt(v){ var a=Math.PI*(1-v/100); return [cx+r*Math.cos(a), cy-r*Math.sin(a)]; }
+  CRZ.forEach(function(z){
+    var p1=pt(frm), p2=pt(z[0]);
+    segs+='<path d="M'+p1[0].toFixed(1)+','+p1[1].toFixed(1)+' A70,70 0 0 1 '+
+          p2[0].toFixed(1)+','+p2[1].toFixed(1)+'" stroke="'+z[1]+'" stroke-width="14" fill="none"/>';
+    frm=z[0];
+  });
+  var ang=-90+score/100*180;
+  return '<svg width="180" height="100" viewBox="0 0 180 100">'+segs+
+    '<g transform="rotate('+ang.toFixed(1)+' 90 85)"><line x1="90" y1="85" x2="90" y2="35" '+
+    'stroke="var(--ink)" stroke-width="3.5" stroke-linecap="round"/></g>'+
+    '<circle cx="90" cy="85" r="5" fill="var(--ink)"/></svg>';
+}
+
+async function doFng(){
+  try{
+    var r=await fetch('https://api.alternative.me/fng/',{cache:'no-store'});
+    if(!r.ok) throw new Error('fng');
+    var d=(await r.json()).data[0], v=parseInt(d.value,10), lab=d.value_classification;
+    if(isNaN(v)) throw new Error('fng');
+    var g=document.getElementById('gauge-cr');
+    if(g) g.innerHTML=gaugeSvg(v)+
+      '<div class="val">Crypto: '+lab.toUpperCase()+' ('+v+')</div>'+
+      '<div class="lab">Fear &amp; Greed Index</div>';
+    var b = v<=25?'ef' : v<=45?'f' : v<=55?'n' : v<=75?'g' : 'eg';
+    var ul=document.getElementById('cr-bullets');
+    if(ul&&CRB[b]) ul.innerHTML=CRB[b].map(function(x){return '<li>'+x+'</li>';}).join('');
+    ok++;
+  }catch(e){}
+}
+
+async function refresh(){
+  ok=0; badge('refreshing\u2026');
+  await Promise.all([doCrypto(), doFx(), doFng()]);
+  if(ok===0){ badge('offline \u2014 morning build'); return; }
+  var t=new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+  badge(ok===3 ? ('live \u00b7 '+t) : ('partly live \u00b7 '+t));
+}
+
+refresh();
+var last=Date.now();
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState==='visible' && Date.now()-last>120000){ last=Date.now(); refresh(); }
+});
 })();
-</script>
-</body>
-</html>
+</script></body></html>
