@@ -19,14 +19,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Install dependencies
         run: pip install --quiet requests cryptography icalendar recurring-ical-events google-auth
+
+      # Prints only whether each secret is visible, never its value - safe for public logs.
+      - name: Check secrets are visible
+        env:
+          BRIEF_PASSCODE:   ${{ secrets.BRIEF_PASSCODE }}
+          GIST_ID:          ${{ secrets.GIST_ID }}
+          GIST_TOKEN:       ${{ secrets.GIST_TOKEN }}
+          CALENDAR_ID:      ${{ secrets.CALENDAR_ID }}
+          GOOGLE_SA_JSON:   ${{ secrets.GOOGLE_SA_JSON }}
+          SHEET_ID:         ${{ secrets.SHEET_ID }}
+        run: |
+          echo "Required:"
+          for v in BRIEF_PASSCODE GIST_ID GIST_TOKEN; do
+            if [ -n "${!v}" ]; then echo "  $v: set"; else echo "  $v: MISSING"; fi
+          done
+          echo "Optional (calendar + portfolio tiles):"
+          for v in CALENDAR_ID GOOGLE_SA_JSON SHEET_ID; do
+            if [ -n "${!v}" ]; then echo "  $v: set"; else echo "  $v: not set"; fi
+          done
 
       - name: Build, encrypt and push payload
         env:
@@ -47,6 +66,6 @@ jobs:
           date -u +"last run: %Y-%m-%dT%H:%M:%SZ" > last-run.txt
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add last-run.txt
+          git add last-run.txt state.json
           git diff --staged --quiet || git commit -m "heartbeat: $(date -u +%F)"
           git push
