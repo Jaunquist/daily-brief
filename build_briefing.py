@@ -15,7 +15,7 @@ Environment:
     GIST_TOKEN      GitHub PAT with the 'gist' scope
 """
 
-import os, sys, io, re, gzip, json, base64, html, datetime as dt
+import os, sys, io, re, time, gzip, json, base64, html, datetime as dt
 from xml.etree import ElementTree as ET
 
 import requests
@@ -76,12 +76,12 @@ OUTLIER_TOLERANCE = 0.25      # drop a source >25% away from the median
 FX = ["USD", "EUR", "JPY", "GBP", "SGD", "AUD", "CNY", "HKD"]
 
 
-def get(url, headers=None, **kw):
+def get(url, headers=None, timeout=None, **kw):
     h = {"User-Agent": "daily-brief/1.0"}
     if headers:
         h.update(headers)
     try:
-        r = requests.get(url, timeout=TIMEOUT, headers=h, **kw)
+        r = requests.get(url, timeout=timeout or TIMEOUT, headers=h, **kw)
         if r.ok:
             return r
     except Exception as e:
@@ -349,11 +349,22 @@ def fear_greed():
         return None
 
 
+FRED_TIMEOUT = 45
+
+
 def fred_series(series_id, days=40):
     """FRED CSV, no API key needed. Stooq rate-limits datacenter IPs such as
     GitHub runners, which is why the index data moved here."""
     cosd = (NOW - dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    r = get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd={cosd}")
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd={cosd}"
+    r = None
+    for attempt in (1, 2):
+        r = get(url, timeout=FRED_TIMEOUT)
+        if r:
+            break
+        if attempt == 1:
+            print(f"  . retrying {series_id}", file=sys.stderr)
+            time.sleep(3)
     if not r:
         return None
     pts = []
@@ -374,18 +385,30 @@ def fred_series(series_id, days=40):
             "asof": pts[-1][0]}
 
 
-def indices():
-    """S&P 500, Nasdaq Composite and VIX - most recent published close."""
+def indices(prev_state=None):
+    """S&P 500, Nasdaq and VIX. FRED times out from runners often enough that the
+    last good values are cached in state.json and reused, clearly marked stale."""
     out = {}
     for key, sid in (("spx", "SP500"), ("ndq", "NASDAQCOM"), ("vix", "VIXCLS")):
         v = fred_series(sid)
         if v:
             out[key] = v
-    if out:
-        print("  indices (FRED): " +
-              ", ".join(f"{k}={v['close']:,.2f} ({v['asof']})" for k, v in out.items()))
-    else:
-        print("  ! no index data from FRED", file=sys.stderr)
+    cache = (prev_state or {}).get("idx_cache") or {}
+    for key in ("spx", "ndq", "vix"):
+        if key not in out and cache.get(key, {}).get("close"):
+            c = dict(cache[key])
+            c["stale"] = True
+            out[key] = c
+    live = [k for k, v in out.items() if not v.get("stale")]
+    stale = [k for k, v in out.items() if v.get("stale")]
+    if live:
+        print("  indices (FRED): " + ", ".join(
+            f"{k}={out[k]['close']:,.2f} ({out[k].get('asof','')})" for k in live))
+    if stale:
+        print(f"  indices reused from cache (FRED unreachable): {', '.join(stale)}",
+              file=sys.stderr)
+    if not out:
+        print("  ! no index data at all", file=sys.stderr)
     return out
 
 
@@ -558,7 +581,7 @@ def calendar_events():
 def sheet_rows():
     """Read the holdings tab via a service account. Nothing public, nothing expiring."""
     sheet_id = os.environ.get("SHEET_ID")
-    rng = os.environ.get("SHEET_RANGE", "A1:Z200")
+    rng = os.environ.get("SHEET_RANGE", "A1:U20000")
     if not sheet_id:
         return None
     tok = _sa_token(["https://www.googleapis.com/auth/spreadsheets.readonly"])
@@ -571,57 +594,98 @@ def sheet_rows():
     return r.json().get("values", [])
 
 
+# Header synonyms, matched after lowercasing and stripping spaces/underscores.
 ALIASES = {
+    # identity
     "ticker": "sym", "symbol": "sym", "asset": "sym", "holding": "sym", "code": "sym",
+    "name": "name", "description": "name",
+    "type": "kind", "class": "kind", "category": "kind",
+    # size
     "qty": "qty", "quantity": "qty", "shares": "qty", "units": "qty", "amount": "qty",
+    "stockqty": "qty", "shareqty": "qty", "noofshares": "qty", "position": "qty",
+    # cost
     "cost": "cost", "costbasis": "cost", "avgcost": "cost", "averagecost": "cost",
     "buyprice": "cost", "entry": "cost", "cost/unit": "cost",
-    "type": "kind", "class": "kind", "category": "kind",
+    "avgbuyprice": "cost", "averagebuyprice": "cost", "avgprice": "cost",
+    # values the sheet already computes - preferred over fetching quotes
+    "curstockprice": "price", "currentprice": "price", "currentstockprice": "price",
+    "price": "price", "marketprice": "price", "lastprice": "price",
+    "totalcurrentvalue": "value", "currentvalue": "value", "marketvalue": "value",
+    "totalbuyvalue": "buyvalue", "totalcost": "buyvalue",
+    "+/-": "pl", "gainloss": "pl", "unrealised": "pl", "unrealized": "pl",
+    "pershare%": "pct", "percent": "pct", "return%": "pct", "change%": "pct",
+    "shareoftotalport": "weight", "weight": "weight", "allocation": "weight",
 }
+
+# Rows whose Type marks them as something other than a position.
+NON_HOLDING_TYPES = {"cash", "dividend", "div", "deposit", "withdrawal", "transfer", "fee"}
 
 
 def parse_holdings(rows):
-    """Flexible header detection so the sheet layout does not have to be exact."""
+    """Tolerant of real spreadsheets: the header can be on any of the first 15 rows,
+    positions can sit anywhere below it (filtered views leave big row gaps), and the
+    sheet's own computed price/value columns are used when present."""
     if not rows:
         return []
     hdr_i, cols = None, {}
-    for i, row in enumerate(rows[:10]):
+    for i, row in enumerate(rows[:15]):
         m = {}
         for j, cell in enumerate(row):
             key = str(cell).strip().lower().replace(" ", "").replace("_", "")
-            if key in ALIASES:
+            if key in ALIASES and ALIASES[key] not in m:
                 m[ALIASES[key]] = j
         if "sym" in m and "qty" in m:
             hdr_i, cols = i, m
             break
     if hdr_i is None:
-        print("  ! no ticker/quantity header found in sheet", file=sys.stderr)
+        got = [str(c)[:18] for c in (rows[0] if rows else [])][:12]
+        print(f"  ! no ticker/quantity header found. first row was: {got}", file=sys.stderr)
         return []
+    print(f"  sheet header on row {hdr_i + 1}; columns found: "
+          + ", ".join(sorted(cols)))
 
     def num(x):
         try:
-            return float(str(x).replace(",", "").replace("$", "").replace("\u20b1", "").strip())
+            t = str(x).replace(",", "").replace("$", "").replace("\u20b1", "")
+            t = t.replace("%", "").strip()
+            if t.startswith("(") and t.endswith(")"):
+                t = "-" + t[1:-1]
+            return float(t)
         except Exception:
             return None
 
-    out = []
+    def cell(row, key):
+        j = cols.get(key)
+        return row[j] if (j is not None and j < len(row)) else None
+
+    found = {}
     for row in rows[hdr_i + 1:]:
-        if not row or cols["sym"] >= len(row):
+        if not row:
             continue
-        sym = str(row[cols["sym"]]).strip().upper()
-        if not sym:
+        sym = str(cell(row, "sym") or "").strip().upper()
+        if not sym or len(sym) > 12:
             continue
-        qty = num(row[cols["qty"]]) if cols["qty"] < len(row) else None
+        kind_raw = str(cell(row, "kind") or "").strip().lower()
+        if any(t in kind_raw for t in NON_HOLDING_TYPES) or sym == "CASH":
+            continue
+        qty = num(cell(row, "qty"))
         if not qty:
             continue
-        cost = num(row[cols["cost"]]) if "cost" in cols and cols["cost"] < len(row) else None
-        kind = (str(row[cols["kind"]]).strip().lower()
-                if "kind" in cols and cols["kind"] < len(row) else "")
-        if not kind:
-            kind = "crypto" if sym in {c[0] for c in COINS} else "etf"
-        out.append({"sym": sym, "qty": qty, "cost": cost,
-                    "kind": "crypto" if "cryp" in kind or "coin" in kind else "etf"})
-    print(f"  holdings: {len(out)} row(s)")
+        kind = "crypto" if ("cryp" in kind_raw or "coin" in kind_raw
+                            or sym in {c[0] for c in COINS}) else "etf"
+        found[sym] = {
+            "sym": sym, "kind": kind,
+            "name": str(cell(row, "name") or "").strip()[:42],
+            "qty": qty,
+            "cost": num(cell(row, "cost")),
+            "price": num(cell(row, "price")),
+            "value": num(cell(row, "value")),
+            "pl": num(cell(row, "pl")),
+            "pct": num(cell(row, "pct")),
+        }
+    out = list(found.values())
+    print(f"  holdings: {len(out)} row(s) "
+          f"({sum(1 for h in out if h['kind'] == 'crypto')} crypto)")
     return out
 
 
@@ -685,24 +749,35 @@ def stooq_quotes(symbols):
 
 
 def portfolio(crypto_rows):
+    """Prefer the sheet's own price and value columns - they are what Justin sees in
+    his spreadsheet. Only fetch quotes for rows the sheet does not already price."""
     rows = parse_holdings(sheet_rows() or [])
     if not rows:
         return None
     spot = {c["sym"]: c for c in (crypto_rows or [])}
-    etfs = [h["sym"] for h in rows if h["kind"] == "etf"]
-    quotes = etf_quotes(etfs)
+    need = [h["sym"] for h in rows
+            if h["price"] is None and h["kind"] == "etf"]
+    quotes = etf_quotes(need) if need else {}
+    if need:
+        print(f"  priced {len(quotes)}/{len(need)} holdings the sheet did not price")
+
     for h in rows:
-        if h["kind"] == "crypto":
-            q = spot.get(h["sym"])
-            h["price"] = q["price"] if q else None
-            h["pct"] = q["chg"] if q else None
-        else:
-            q = quotes.get(h["sym"])
-            h["price"] = q["price"] if q else None
-            h["pct"] = q["pct"] if q else None
-        h["value"] = (h["price"] * h["qty"]) if h["price"] else None
-        h["pl"] = ((h["price"] - h["cost"]) * h["qty"]
-                   if (h["price"] and h["cost"]) else None)
+        if h["price"] is None:
+            if h["kind"] == "crypto" and h["sym"] in spot:
+                h["price"] = spot[h["sym"]]["price"]
+                h["pct"] = h["pct"] if h["pct"] is not None else spot[h["sym"]]["chg"]
+            else:
+                q = quotes.get(h["sym"])
+                if q:
+                    h["price"] = q["price"]
+                    h["pct"] = h["pct"] if h["pct"] is not None else q["pct"]
+        elif h["kind"] == "crypto" and h["sym"] in spot and h["pct"] is None:
+            h["pct"] = spot[h["sym"]]["chg"]
+        if h["value"] is None and h["price"] is not None:
+            h["value"] = h["price"] * h["qty"]
+        if h["pl"] is None and h["price"] is not None and h["cost"] is not None:
+            h["pl"] = (h["price"] - h["cost"]) * h["qty"]
+    rows.sort(key=lambda h: (h["value"] or 0), reverse=True)
     return rows
 
 
@@ -822,6 +897,9 @@ def snapshot_state(d):
         "btc": btc["price"] if btc else None,
         "usdphp": ((d.get("fx") or {}).get("USD") or {}).get("php"),
         "rates": {k: v[0] for k, v in RATES.items()},
+        "idx_cache": {k: {"close": v.get("close"), "pct": v.get("pct"),
+                          "asof": v.get("asof")}
+                      for k, v in (d.get("indices") or {}).items() if v.get("close")},
         "ph_cpi": PRINTS["ph_cpi"][1],
         "edition": EDITION,
         "built": NOW.isoformat(),
@@ -972,14 +1050,16 @@ LIVE_JS = """<script>
 (function(){
 var COINS=['BTC','ETH','SOL','BONK','JUP'];
 var FXC=['USD','EUR','JPY','GBP','SGD','AUD','CNY','HKD'];
+var CG_IDS={BTC:'bitcoin',ETH:'ethereum',SOL:'solana',BONK:'bonk',JUP:'jupiter-exchange-solana'};
 var CRB=__CR_BUCKETS__;
 var CRZ=[[25,'#d13b3b'],[45,'#f0b429'],[55,'#9aa4b2'],[75,'#8fd19e'],[100,'#3fb46e']];
-var ok=0, LIVEPX={}, LIVECHG={};
+var TOL=0.25;
+var LIVEPX={}, LIVECHG={}, ok=0;
 
+/* ---------- formatting ---------- */
 function money(v){
-  v = (typeof v === 'number') ? v : parseFloat(v);
+  v=(typeof v==='number')?v:parseFloat(v);
   if(v==null||isNaN(v)) return '\\u2014';
-  // en-US explicitly: the device locale would otherwise swap , and . in prices
   if(v>=1000) return '$'+v.toLocaleString('en-US',{maximumFractionDigits:0});
   if(v>=1) return '$'+v.toFixed(2);
   return '$'+v.toFixed(8).replace(/0+$/,'');
@@ -988,155 +1068,262 @@ function pct(v){
   if(v==null||isNaN(v)) return '<span class="muted">\\u2014</span>';
   return '<span class="'+(v>=0?'up':'down')+'">'+(v>=0?'+':'\\u2212')+Math.abs(v).toFixed(2)+'%</span>';
 }
-function badge(t){ var e=document.getElementById('liveBadge'); if(e) e.textContent=t; }
+function median(a){a=a.slice().sort(function(x,y){return x-y;});var m=a.length>>1;
+  return a.length%2?a[m]:(a[m-1]+a[m])/2;}
+function badge(t){var e=document.getElementById('liveBadge'); if(e) e.textContent=t;}
 
-var CG_IDS={BTC:'bitcoin',ETH:'ethereum',SOL:'solana',BONK:'bonk',JUP:'jupiter-exchange-solana'};
-var TOL=0.25;
+/* ---------- splash ---------- */
+var STEPS=[['cb','Coinbase'],['cg','CoinGecko'],['bn','Binance'],
+           ['fx','ECB via Frankfurter'],['fng','Fear & Greed']];
+var timers={}, splashEl=null, settled=0;
 
-function median(a){ a=a.slice().sort(function(x,y){return x-y;}); var m=a.length>>1;
-  return a.length%2 ? a[m] : (a[m-1]+a[m])/2; }
+function buildSplash(){
+  var h='<div class="sp-card" role="status" aria-live="polite">'+
+    '<div class="sp-title">Refreshing live data</div>'+
+    '<div class="sp-sub">Weather, news and charts come from the last build.</div>'+
+    '<div class="sp-bar"><div class="sp-fill" id="sp-fill"></div></div><ul class="sp-list">';
+  STEPS.forEach(function(s){
+    h+='<li class="sp-step" id="sp-'+s[0]+'"><span class="sp-ic">\\u00b7</span>'+
+       '<span class="sp-lb">'+s[1]+'</span><span class="sp-st">waiting</span></li>';
+  });
+  h+='</ul><div class="sp-foot">Click outside or press Esc to dismiss</div></div>';
+  var el=document.createElement('div');
+  el.id='splash'; el.innerHTML=h;
+  el.addEventListener('click',function(e){ if(e.target===el) closeSplash(); });
+  document.body.appendChild(el);
+  return el;
+}
+function openSplash(){
+  settled=0;
+  if(!splashEl) splashEl=buildSplash();
+  STEPS.forEach(function(s){ setStep(s[0],'wait','waiting'); });
+  var f=document.getElementById('sp-fill'); if(f) f.style.width='0%';
+  splashEl.style.display='flex';
+}
+function closeSplash(){ if(splashEl) splashEl.style.display='none';
+  Object.keys(timers).forEach(function(k){clearInterval(timers[k]);}); timers={}; }
+document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeSplash(); });
 
+function setStep(id,state,txt){
+  var li=document.getElementById('sp-'+id); if(!li) return;
+  var ic=li.querySelector('.sp-ic'), st=li.querySelector('.sp-st');
+  var marks={wait:'\\u00b7',run:'\\u25cc',ok:'\\u2713',warn:'!',fail:'\\u2715'};
+  ic.textContent=marks[state]||'\\u00b7';
+  ic.className='sp-ic'+(state==='run'?' sp-spin':'')+
+    (state==='ok'?' st-ok':state==='warn'?' st-warn':state==='fail'?' st-fail':'');
+  st.textContent=txt; st.className='sp-st'+
+    (state==='ok'?' st-ok':state==='warn'?' st-warn':state==='fail'?' st-fail':'');
+}
+function bumpBar(){
+  settled++;
+  var f=document.getElementById('sp-fill');
+  if(f) f.style.width=Math.round(settled/STEPS.length*100)+'%';
+  if(settled>=STEPS.length) setTimeout(closeSplash,700);
+}
+
+/* Runs fn, timing it and reporting ok / warn / fail to the splash.
+   warn = answered but returned nothing usable; fail = threw or non-OK. */
+async function track(id,fn){
+  var t0=Date.now();
+  setStep(id,'run','0.0s');
+  timers[id]=setInterval(function(){
+    setStep(id,'run',((Date.now()-t0)/1000).toFixed(1)+'s');
+  },100);
+  var res=null, state='ok', msg='';
+  try{
+    res=await fn();
+    var n=res?Object.keys(res).length:0;
+    if(!n){ state='warn'; msg='no data'; }
+    else   { msg=n+' value'+(n===1?'':'s'); }
+  }catch(e){ state='fail'; msg='failed'; }
+  clearInterval(timers[id]); delete timers[id];
+  setStep(id,state,msg+' \\u00b7 '+((Date.now()-t0)/1000).toFixed(1)+'s');
+  bumpBar();
+  if(state==='ok') ok++;
+  return res||{};
+}
+
+/* ---------- sources ---------- */
 async function cbAll(){
   var y=new Date(Date.now()-86400000).toISOString().slice(0,10), out={};
   await Promise.all(COINS.map(async function(sym){
+    var a=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot',{cache:'no-store'});
+    if(!a.ok) return;
+    var px=parseFloat((await a.json()).data.amount), ch=null;
     try{
-      var a=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot',{cache:'no-store'});
-      if(!a.ok) return;
-      var px=parseFloat((await a.json()).data.amount), ch=null;
-      try{
-        var b=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot?date='+y,{cache:'no-store'});
-        if(b.ok){ var p=parseFloat((await b.json()).data.amount); if(p) ch=(px-p)/p*100; }
-      }catch(e){}
-      if(!isNaN(px)) out[sym]=[px,ch];
+      var b=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot?date='+y,{cache:'no-store'});
+      if(b.ok){ var p=parseFloat((await b.json()).data.amount); if(p) ch=(px-p)/p*100; }
     }catch(e){}
+    if(!isNaN(px)) out[sym]=[px,ch];
   }));
   return out;
 }
-
 async function cgAll(){
-  var out={};
-  try{
-    var ids=COINS.map(function(c){return CG_IDS[c];}).join(',');
-    var r=await fetch('https://api.coingecko.com/api/v3/simple/price?ids='+ids+
-                      '&vs_currencies=usd&include_24hr_change=true',{cache:'no-store'});
-    if(!r.ok) return out;
-    var j=await r.json();
-    COINS.forEach(function(sym){
-      var d=j[CG_IDS[sym]];
-      if(d&&d.usd) out[sym]=[d.usd, (d.usd_24h_change==null?null:d.usd_24h_change)];
-    });
-  }catch(e){}
+  var out={}, ids=COINS.map(function(c){return CG_IDS[c];}).join(',');
+  var r=await fetch('https://api.coingecko.com/api/v3/simple/price?ids='+ids+
+                    '&vs_currencies=usd&include_24hr_change=true',{cache:'no-store'});
+  if(!r.ok) throw new Error('cg');
+  var j=await r.json();
+  COINS.forEach(function(sym){
+    var d=j[CG_IDS[sym]];
+    if(d&&d.usd) out[sym]=[d.usd,(d.usd_24h_change==null?null:d.usd_24h_change)];
+  });
   return out;
 }
-
 async function bnAll(){
-  var out={};
-  var syms=encodeURIComponent(JSON.stringify(COINS.map(function(c){return c+'USDT';})));
+  var out={}, syms=encodeURIComponent(JSON.stringify(COINS.map(function(c){return c+'USDT';})));
+  var last=null;
   for (const host of ['https://data-api.binance.vision','https://api.binance.com']) {
     try{
       var r=await fetch(host+'/api/v3/ticker/24hr?symbols='+syms,{cache:'no-store'});
-      if(!r.ok) continue;
+      if(!r.ok){ last=new Error('bn '+r.status); continue; }
       (await r.json()).forEach(function(row){
         var sym=row.symbol.replace(/USDT$/,'');
-        if(COINS.indexOf(sym)>=0) out[sym]=[parseFloat(row.lastPrice), parseFloat(row.priceChangePercent)];
+        if(COINS.indexOf(sym)>=0) out[sym]=[parseFloat(row.lastPrice),parseFloat(row.priceChangePercent)];
       });
       if(Object.keys(out).length) return out;
-    }catch(e){}
+    }catch(e){ last=e; }
   }
+  if(last) throw last;
   return out;
 }
+async function fxAll(){
+  var r=await fetch('https://api.frankfurter.dev/v1/latest?from=PHP&to='+FXC.join(','),
+                    {cache:'no-store'});
+  if(!r.ok) throw new Error('fx');
+  var j=await r.json(), out={};
+  FXC.forEach(function(k){
+    var v=j.rates&&j.rates[k];
+    if(v) out[k]=(1/v)*(k==='JPY'?100:1);
+  });
+  return out;
+}
+async function fngAll(){
+  var r=await fetch('https://api.alternative.me/fng/',{cache:'no-store'});
+  if(!r.ok) throw new Error('fng');
+  var d=(await r.json()).data[0], v=parseInt(d.value,10);
+  if(isNaN(v)) return {};
+  return {value:v,label:d.value_classification};
+}
 
-async function doCrypto(){
-  var feeds;
-  try{ feeds = {CB: await cbAll(), CG: await cgAll(), BN: await bnAll()}; }
-  catch(e){ return; }
-  var any=false;
+/* ---------- apply ---------- */
+function mergeCrypto(feeds){
   COINS.forEach(function(sym){
     var q={};
-    Object.keys(feeds).forEach(function(k){ if(feeds[k][sym]) q[k]=feeds[k][sym]; });
+    Object.keys(feeds).forEach(function(k){ if(feeds[k]&&feeds[k][sym]) q[k]=feeds[k][sym]; });
     var names=Object.keys(q);
     if(!names.length) return;
     var med=median(names.map(function(k){return q[k][0];}));
     var kept=[], dropped=[];
     names.forEach(function(k){
-      if(med && Math.abs(q[k][0]-med)/med > TOL) dropped.push(k); else kept.push(k);
+      if(med&&Math.abs(q[k][0]-med)/med>TOL) dropped.push(k); else kept.push(k);
     });
     if(!kept.length){ kept=names; dropped=[]; }
     var px=median(kept.map(function(k){return q[k][0];}));
     var chs=kept.map(function(k){return q[k][1];}).filter(function(v){return v!=null&&!isNaN(v);});
     var ch=chs.length?median(chs):null;
-    LIVEPX[sym]=px; LIVECHG[sym]=ch; any=true;
+    LIVEPX[sym]=px; LIVECHG[sym]=ch;
     var row=document.querySelector('tr[data-coin="'+sym+'"]'); if(!row) return;
     var a=row.querySelector('[data-live=price]'), b=row.querySelector('[data-live=chg]'),
-        c=row.querySelector('[data-live=src]');
+        c=row.querySelector('[data-live=src]'), ab=row.querySelector('[data-live=abs]');
     if(a) a.textContent=money(px);
     if(b) b.innerHTML=pct(ch);
-    if(c) c.textContent=kept.length+'/'+names.length+(dropped.length?' \u00b7 '+dropped.join('+')+' off':'');
+    if(ab&&ch!=null){
+      var prev=px/(1+ch/100), dl=px-prev, A=Math.abs(dl);
+      ab.innerHTML='<span class="'+(dl>=0?'up':'down')+'">'+(dl>=0?'+':'\\u2212')+'$'+
+        (A>=0.01?A.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})
+                :A.toFixed(8).replace(/0+$/,''))+'</span>';
+    }
+    if(c) c.textContent=kept.length+'/'+names.length+(dropped.length?' \\u00b7 '+dropped.join('+')+' off':'');
   });
-  if(any) ok++;
   try{ revaluePortfolio(); }catch(e){}
 }
-
-async function doFx(){
-  try{
-    var r=await fetch('https://api.frankfurter.app/latest?from=PHP&to='+FXC.join(','),{cache:'no-store'});
-    if(!r.ok) throw new Error('fx');
-    var rates=(await r.json()).rates;
-    FXC.forEach(function(k){
-      var v=rates[k]; if(!v) return;
-      var php=1/v; if(k==='JPY') php*=100;
-      var el=document.querySelector('[data-fx="'+k+'"]');
-      if(el) el.textContent=php.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-    });
-    ok++;
-  }catch(e){}
+function applyFx(rates){
+  Object.keys(rates||{}).forEach(function(k){
+    var el=document.querySelector('[data-fx="'+k+'"]');
+    if(el) el.textContent=rates[k].toLocaleString('en-US',
+      {minimumFractionDigits:2,maximumFractionDigits:2});
+  });
 }
-
 function gaugeSvg(score){
   var cx=90,cy=85,r=70,segs='',frm=0;
-  function pt(v){ var a=Math.PI*(1-v/100); return [cx+r*Math.cos(a), cy-r*Math.sin(a)]; }
+  function pt(v){var a=Math.PI*(1-v/100);return [cx+r*Math.cos(a),cy-r*Math.sin(a)];}
   CRZ.forEach(function(z){
-    var p1=pt(frm), p2=pt(z[0]);
+    var p1=pt(frm),p2=pt(z[0]);
     segs+='<path d="M'+p1[0].toFixed(1)+','+p1[1].toFixed(1)+' A70,70 0 0 1 '+
-          p2[0].toFixed(1)+','+p2[1].toFixed(1)+'" stroke="'+z[1]+'" stroke-width="14" fill="none"/>';
+      p2[0].toFixed(1)+','+p2[1].toFixed(1)+'" stroke="'+z[1]+'" stroke-width="14" fill="none"/>';
     frm=z[0];
   });
   var ang=-90+score/100*180;
   return '<svg width="180" height="100" viewBox="0 0 180 100">'+segs+
-    '<g transform="rotate('+ang.toFixed(1)+' 90 85)"><line x1="90" y1="85" x2="90" y2="35" '+
-    'stroke="var(--ink)" stroke-width="3.5" stroke-linecap="round"/></g>'+
-    '<circle cx="90" cy="85" r="5" fill="var(--ink)"/></svg>';
+    '<text x="90" y="69" text-anchor="middle" font-size="27" font-weight="700" fill="var(--ink)">'+
+    Math.round(score)+'</text>'+
+    '<text x="90" y="81" text-anchor="middle" font-size="9" fill="var(--muted)">/ 100</text>'+
+    '<g transform="rotate('+ang.toFixed(1)+' 90 85)"><line x1="90" y1="85" x2="90" y2="41" '+
+    'stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/></g>'+
+    '<circle cx="90" cy="85" r="4" fill="var(--ink)"/></svg>';
+}
+function applyFng(d){
+  if(!d||d.value==null) return;
+  var g=document.getElementById('gauge-cr');
+  if(g) g.innerHTML=gaugeSvg(d.value)+
+    '<div class="val">Crypto: '+d.label.toUpperCase()+' ('+d.value+')</div>'+
+    '<div class="lab">Fear &amp; Greed Index</div>';
+  var b=d.value<=25?'ef':d.value<=45?'f':d.value<=55?'n':d.value<=75?'g':'eg';
+  var ul=document.getElementById('cr-bullets');
+  if(ul&&CRB[b]) ul.innerHTML=CRB[b].map(function(x){return '<li>'+x+'</li>';}).join('');
 }
 
-async function doFng(){
-  try{
-    var r=await fetch('https://api.alternative.me/fng/',{cache:'no-store'});
-    if(!r.ok) throw new Error('fng');
-    var d=(await r.json()).data[0], v=parseInt(d.value,10), lab=d.value_classification;
-    if(isNaN(v)) throw new Error('fng');
-    var g=document.getElementById('gauge-cr');
-    if(g) g.innerHTML=gaugeSvg(v)+
-      '<div class="val">Crypto: '+lab.toUpperCase()+' ('+v+')</div>'+
-      '<div class="lab">Fear &amp; Greed Index</div>';
-    var b = v<=25?'ef' : v<=45?'f' : v<=55?'n' : v<=75?'g' : 'eg';
-    var ul=document.getElementById('cr-bullets');
-    if(ul&&CRB[b]) ul.innerHTML=CRB[b].map(function(x){return '<li>'+x+'</li>';}).join('');
-    ok++;
-  }catch(e){}
+function revaluePortfolio(){
+  var rows=document.querySelectorAll('tr[data-holding]');
+  if(!rows.length) return;
+  var sum=0,pl=0,sawPl=false;
+  rows.forEach(function(r){
+    var sym=r.getAttribute('data-holding');
+    var qty=parseFloat(r.getAttribute('data-qty'));
+    var cost=parseFloat(r.getAttribute('data-cost'));
+    var px=LIVEPX[sym];
+    if(px==null||isNaN(qty)) return;
+    var val=px*qty; sum+=val;
+    if(!isNaN(cost)){ pl+=(px-cost)*qty; sawPl=true; }
+    var a=r.querySelector('[data-pf=price]'),b=r.querySelector('[data-pf=value]'),
+        c=r.querySelector('[data-pf=pct]');
+    if(a) a.textContent=money(px);
+    if(b) b.textContent=money(val);
+    if(c) c.innerHTML=pct(LIVECHG[sym]);
+  });
+  var tc=document.querySelector('[data-pf=total]');
+  if(tc){ var etf=parseFloat(tc.getAttribute('data-etf'))||0;
+    tc.innerHTML='<b>'+money(sum+etf)+'</b>'; }
+  var pc=document.querySelector('[data-pf=totalpl]');
+  if(pc&&pc.getAttribute('data-anypl')==='1'){
+    var e2=parseFloat(pc.getAttribute('data-etfpl'))||0;
+    if(sawPl||e2) pc.innerHTML='<b>'+money(pl+e2)+'</b>';
+  }
 }
 
+/* ---------- orchestration ---------- */
+var busy=false, last=0;
 async function refresh(){
-  ok=0; badge('refreshing\\u2026');
-  await Promise.all([doCrypto(), doFx(), doFng()]);
-  if(ok===0){ badge('offline \\u2014 morning build'); return; }
+  if(busy) return;
+  busy=true; ok=0;
+  openSplash();
+  badge('refreshing\\u2026');
+  try{
+    var res=await Promise.all([track('cb',cbAll),track('cg',cgAll),track('bn',bnAll),
+                               track('fx',fxAll),track('fng',fngAll)]);
+    mergeCrypto({CB:res[0],CG:res[1],BN:res[2]});
+    applyFx(res[3]);
+    applyFng(res[4]);
+  }catch(e){}
   var t=new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-  badge(ok===3 ? ('live \\u00b7 '+t) : ('partly live \\u00b7 '+t));
+  badge(ok===0?'offline \\u2014 last build':(ok===5?'live \\u00b7 '+t:'partly live \\u00b7 '+t));
+  last=Date.now(); busy=false;
 }
-
+window.dbRefresh=refresh;
 refresh();
-var last=Date.now();
-document.addEventListener('visibilitychange', function(){
-  if(document.visibilityState==='visible' && Date.now()-last>120000){ last=Date.now(); refresh(); }
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='visible'&&Date.now()-last>120000) refresh();
 });
 })();
 </script>"""
@@ -1470,6 +1657,25 @@ h1{{font-size:22px}} .sub{{color:var(--muted);font-size:13px}}
 .g2{{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}}
 .card{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}}
 #liveBadge{{font-weight:600;color:var(--accent)}}
+#refreshBtn{{background:var(--card);color:var(--ink);border:1px solid var(--line);
+ border-radius:999px;padding:6px 12px;font-size:13px;cursor:pointer;margin-right:6px}}
+#splash{{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
+ justify-content:center;background:rgba(0,0,0,.45)}}
+.sp-card{{background:var(--card);border:1px solid var(--line);border-radius:14px;
+ padding:17px 19px;width:min(340px,90vw);box-shadow:0 18px 50px rgba(0,0,0,.35)}}
+.sp-title{{font-size:15px;font-weight:700}}
+.sp-sub{{font-size:11.5px;color:var(--muted);margin-bottom:11px}}
+.sp-bar{{height:4px;background:var(--line);border-radius:3px;overflow:hidden;margin-bottom:11px}}
+.sp-fill{{height:100%;width:0;background:var(--accent);transition:width .25s}}
+.sp-list{{list-style:none;margin:0;padding:0}}
+.sp-step{{display:flex;align-items:center;gap:9px;padding:4px 0;font-size:12.5px}}
+.sp-ic{{width:15px;text-align:center;font-weight:700}}
+.sp-lb{{flex:1}}
+.sp-st{{color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums}}
+.sp-foot{{margin-top:10px;font-size:10.5px;color:var(--muted);text-align:center}}
+.st-ok{{color:var(--up)}} .st-warn{{color:#d9a21b}} .st-fail{{color:var(--down)}}
+@keyframes spin{{to{{transform:rotate(360deg)}}}}
+.sp-spin{{display:inline-block;animation:spin .9s linear infinite}}
 .card h2{{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px}}
 .big{{font-size:30px;font-weight:700}} .muted{{color:var(--muted);font-size:12.5px}}
 .up{{color:var(--up)}} .down{{color:var(--down)}}
@@ -1558,7 +1764,9 @@ footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
 <header>
  <div><h1>Good morning, Justin ☀️</h1>
  <div class="sub">{NOW.strftime('%A, %B %-d, %Y')} · {CITY['name']} (PHT) · {EDITION.capitalize()} edition {NOW.strftime('%-I:%M %p')} · <span id="liveBadge">…</span></div></div>
- <button id="themeBtn" onclick="tt()">\U0001F319 Dark</button>
+ <div style="white-space:nowrap"><button id="refreshBtn"
+  onclick="if(window.dbRefresh)window.dbRefresh()" title="Refetch live prices">\u27f3</button>
+ <button id="themeBtn" onclick="tt()">\U0001F319 Dark</button></div>
 </header>
 
 <div class="grid g2">
@@ -1643,11 +1851,17 @@ try{{ap(localStorage.getItem('briefing-theme')||'light')}}catch(e){{ap('light')}
 def shell_gist_id():
     """The id hardcoded in index.html, so we can refuse to publish on a mismatch."""
     try:
-        shell = io.open("index.html", encoding="utf-8").read()
-    except OSError:
+        shell = io.open("index.html", encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        print(f"  ! cannot read index.html ({type(e).__name__}). cwd holds: "
+              + ", ".join(sorted(os.listdir("."))[:25]), file=sys.stderr)
         return None
     m = re.search(r"""var\s+GIST\s*=\s*['"]([0-9a-fA-F]+)['"]""", shell)
-    return m.group(1) if m else None
+    if not m:
+        print("  ! index.html has no recognisable \"var GIST = '...'\" line",
+              file=sys.stderr)
+        return None
+    return m.group(1)
 
 
 def frozen_salt(gist_id, token):
@@ -1741,7 +1955,8 @@ def main():
 
     print(f"Gathering data ({EDITION} edition)...")
     w = weather()
-    idx = indices()
+    prev_state = load_state()
+    idx = indices(prev_state)
     fg = fear_greed()
     vix = idx.get("vix", {}).get("close") if idx else None
 
@@ -1755,7 +1970,7 @@ def main():
         "cr": crypto_gauge(fg),
         "news": news(),
         "fg": fg,
-        "prev_state": load_state(),
+        "prev_state": prev_state,
         "alerts": weather_alerts(w),
         "ph": ph_indicators(),
         "calendar": calendar_events(),
