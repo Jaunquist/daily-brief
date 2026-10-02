@@ -15,7 +15,7 @@ Environment:
     GIST_TOKEN      GitHub PAT with the 'gist' scope
 """
 
-import os, sys, gzip, json, base64, html, datetime as dt
+import os, sys, io, re, gzip, json, base64, html, datetime as dt
 from xml.etree import ElementTree as ET
 
 import requests
@@ -37,6 +37,11 @@ RATES = {
 }
 
 CITY = {"name": "Manila", "lat": 14.5995, "lon": 120.9842}
+
+# Gists this builder must never write to. The legacy briefing is maintained by a
+# separate Claude scheduled task with its own locked template; writing here would
+# silently replace it. Refusing is deliberate - do not "fix" by removing the entry.
+PROTECTED_GISTS = {"fd25c59bbbab14d6ea56532bad7bfa9c"}
 
 # Which edition this is. The 6am run shows today; the 6pm run shows what is left
 # of today plus tomorrow, because by evening today's agenda is mostly spent.
@@ -169,6 +174,9 @@ def crypto():
             except Exception:
                 pass
         rows.append({"sym": sym, "name": name, "price": now_p, "chg": chg})
+    if rows:
+        print("  crypto: " + ", ".join(f"{r['sym']}={r['price']:.6f}".rstrip("0").rstrip(".")
+                                       for r in rows))
     return rows
 
 
@@ -183,27 +191,44 @@ def fear_greed():
         return None
 
 
-def indices():
-    r = get("https://stooq.com/q/l/?s=^spx+^ndq+^vix&f=sd2t2ohlcvp&h&e=csv")
-    out = {}
+def fred_series(series_id, days=40):
+    """FRED CSV, no API key needed. Stooq rate-limits datacenter IPs such as
+    GitHub runners, which is why the index data moved here."""
+    cosd = (NOW - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    r = get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd={cosd}")
     if not r:
-        return out
-    lines = r.text.strip().splitlines()
-    for line in lines[1:]:
-        p = line.split(",")
-        if len(p) < 8:
+        return None
+    pts = []
+    for line in r.text.strip().splitlines()[1:]:
+        parts = line.split(",")
+        if len(parts) < 2:
             continue
-        sym = p[0].lower()
         try:
-            close, openp = float(p[6]), float(p[3])
+            pts.append((parts[0], float(parts[1])))
         except ValueError:
-            continue
-        pct = (close - openp) / openp * 100 if openp else None
-        key = {"^spx": "spx", "^ndq": "ndq", "^vix": "vix"}.get(sym)
-        if key:
-            out[key] = {"close": close, "pct": pct}
-    return out
+            continue          # FRED writes "." on non-trading days
+    if not pts:
+        return None
+    last = pts[-1][1]
+    prev = pts[-2][1] if len(pts) > 1 else None
+    return {"close": last,
+            "pct": ((last - prev) / prev * 100) if prev else None,
+            "asof": pts[-1][0]}
 
+
+def indices():
+    """S&P 500, Nasdaq Composite and VIX - most recent published close."""
+    out = {}
+    for key, sid in (("spx", "SP500"), ("ndq", "NASDAQCOM"), ("vix", "VIXCLS")):
+        v = fred_series(sid)
+        if v:
+            out[key] = v
+    if out:
+        print("  indices (FRED): " +
+              ", ".join(f"{k}={v['close']:,.2f} ({v['asof']})" for k, v in out.items()))
+    else:
+        print("  ! no index data from FRED", file=sys.stderr)
+    return out
 
 
 # ---------------------------------------------------------------- calendar
@@ -397,8 +422,44 @@ def parse_holdings(rows):
     return out
 
 
+def yahoo_quotes(symbols):
+    out = {}
+    for sym in symbols:
+        r = get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=5d&interval=1d")
+        if not r:
+            continue
+        try:
+            meta = r.json()["chart"]["result"][0]["meta"]
+            price = meta.get("regularMarketPrice")
+            prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+            if price is None:
+                continue
+            out[sym.upper()] = {"price": float(price),
+                                "pct": ((price - prev) / prev * 100) if prev else None}
+        except Exception:
+            continue
+    return out
+
+
+def etf_quotes(symbols):
+    """Yahoo first; Stooq as fallback. Logs which source answered."""
+    if not symbols:
+        return {}
+    q = yahoo_quotes(symbols)
+    if q:
+        print(f"  etf quotes (yahoo): {len(q)}/{len(symbols)}")
+    missing = [x for x in symbols if x.upper() not in q]
+    if missing:
+        fb = stooq_quotes(missing)
+        if fb:
+            print(f"  etf quotes (stooq fallback): {len(fb)}/{len(missing)}")
+        q.update(fb)
+    if not q:
+        print("  ! no ETF quotes from any source", file=sys.stderr)
+    return q
+
+
 def stooq_quotes(symbols):
-    """Server-side ETF/equity quotes. Stooq has no CORS, so this cannot run in the browser."""
     if not symbols:
         return {}
     q = "+".join(f"{s.lower()}.us" for s in symbols)
@@ -426,7 +487,7 @@ def portfolio(crypto_rows):
         return None
     spot = {c["sym"]: c for c in (crypto_rows or [])}
     etfs = [h["sym"] for h in rows if h["kind"] == "etf"]
-    quotes = stooq_quotes(etfs)
+    quotes = etf_quotes(etfs)
     for h in rows:
         if h["kind"] == "crypto":
             q = spot.get(h["sym"])
@@ -560,7 +621,11 @@ def pct_html(v, suffix="%"):
 
 
 def money(v):
-    if v is None:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if v != v:                      # NaN
         return "—"
     if v >= 1000:
         return f"${v:,.0f}"
@@ -581,8 +646,10 @@ var CRZ=[[25,'#d13b3b'],[45,'#f0b429'],[55,'#9aa4b2'],[75,'#8fd19e'],[100,'#3fb4
 var ok=0, LIVEPX={}, LIVECHG={};
 
 function money(v){
+  v = (typeof v === 'number') ? v : parseFloat(v);
   if(v==null||isNaN(v)) return '\\u2014';
-  if(v>=1000) return '$'+v.toLocaleString(undefined,{maximumFractionDigits:0});
+  // en-US explicitly: the device locale would otherwise swap , and . in prices
+  if(v>=1000) return '$'+v.toLocaleString('en-US',{maximumFractionDigits:0});
   if(v>=1) return '$'+v.toFixed(2);
   return '$'+v.toFixed(8).replace(/0+$/,'');
 }
@@ -653,7 +720,7 @@ async function doFx(){
       var v=rates[k]; if(!v) return;
       var php=1/v; if(k==='JPY') php*=100;
       var el=document.querySelector('[data-fx="'+k+'"]');
-      if(el) el.textContent=php.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+      if(el) el.textContent=php.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
     });
     ok++;
   }catch(e){}
@@ -984,9 +1051,58 @@ try{{ap(localStorage.getItem('briefing-theme')||'light')}}catch(e){{ap('light')}
 
 
 # ------------------------------------------------------------------ crypto
-def encrypt(plaintext_html, passcode):
-    blob = gzip.compress(plaintext_html.encode("utf-8"), 9)
+def shell_gist_id():
+    """The id hardcoded in index.html, so we can refuse to publish on a mismatch."""
+    try:
+        shell = io.open("index.html", encoding="utf-8").read()
+    except OSError:
+        return None
+    m = re.search(r"""var\s+GIST\s*=\s*['"]([0-9a-fA-F]+)['"]""", shell)
+    return m.group(1) if m else None
+
+
+def frozen_salt(gist_id, token):
+    """Reuse the salt already in the gist's payload.
+
+    'Remember this device' stores the derived AES key, which is bound to the salt.
+    A fresh random salt every build silently invalidates it and puts the passcode
+    prompt back on every publish. Reusing a salt is safe; reusing an IV is not,
+    so the IV below stays random.
+    """
+    env = os.environ.get("BRIEF_SALT_HEX", "").strip()
+    if env:
+        try:
+            b = bytes.fromhex(env)
+            if len(b) == 16:
+                print("  salt: from BRIEF_SALT_HEX")
+                return b
+        except ValueError:
+            print("  ! BRIEF_SALT_HEX is not valid hex - ignoring", file=sys.stderr)
+    r = get(f"https://api.github.com/gists/{gist_id}",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json"})
+    if r:
+        try:
+            f = r.json().get("files", {}).get("payload.txt")
+            if f:
+                txt = f.get("content") or ""
+                if f.get("truncated") or not txt:
+                    raw_r = get(f["raw_url"])
+                    txt = raw_r.text if raw_r else ""
+                if txt.strip():
+                    salt = base64.b64decode(txt.strip())[:16]
+                    if len(salt) == 16:
+                        print("  salt: reused from current payload")
+                        return salt
+        except Exception:
+            pass
     salt = os.urandom(16)
+    print(f"  salt: generated fresh - pin it by setting BRIEF_SALT_HEX={salt.hex()}")
+    return salt
+
+
+def encrypt(plaintext_html, passcode, salt):
+    blob = gzip.compress(plaintext_html.encode("utf-8"), 9)
     iv = os.urandom(12)
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600000)
     key = kdf.derive(passcode.encode("utf-8"))
@@ -1010,8 +1126,29 @@ def main():
     passcode = os.environ.get("BRIEF_PASSCODE")
     gist_id = os.environ.get("GIST_ID")
     token = os.environ.get("GIST_TOKEN")
-    if not all([passcode, gist_id, token]):
-        sys.exit("Missing BRIEF_PASSCODE, GIST_ID or GIST_TOKEN.")
+    missing = [k for k, v in (("BRIEF_PASSCODE", passcode), ("GIST_ID", gist_id),
+                              ("GIST_TOKEN", token)) if not v]
+    if missing:
+        sys.exit(
+            "Missing required secret(s): " + ", ".join(missing) + "\n"
+            "  Add them at: Settings > Secrets and variables > Actions > "
+            "the 'Secrets' tab (NOT 'Variables') > New repository secret.\n"
+            "  Names are case-sensitive and must have no surrounding spaces.")
+
+    if gist_id in PROTECTED_GISTS:
+        sys.exit(
+            f"REFUSING TO PUBLISH: GIST_ID {gist_id} is the legacy briefing's gist.\n"
+            "  That payload is maintained by a separate Claude scheduled task using a\n"
+            "  locked template. Point GIST_ID at this system's own gist instead.")
+
+    shell_id = shell_gist_id()
+    if shell_id and shell_id.lower() != gist_id.lower():
+        sys.exit(
+            f"REFUSING TO PUBLISH: index.html reads gist {shell_id} but GIST_ID is {gist_id}.\n"
+            "  The page would show a payload this builder never wrote. Update the\n"
+            "  'var GIST' line in index.html so both point at the same gist.")
+    print(f"Target gist {gist_id} - matches index.html" if shell_id else
+          f"Target gist {gist_id} (index.html not found to cross-check)")
 
     print(f"Gathering data ({EDITION} edition)...")
     w = weather()
@@ -1042,7 +1179,7 @@ def main():
     page = build_html(data)
     print(f"  html {len(page):,} bytes")
 
-    payload = encrypt(page, passcode)
+    payload = encrypt(page, passcode, frozen_salt(gist_id, token))
     print(f"  payload {len(payload):,} base64 chars")
 
     stamp = push(payload, gist_id, token)
