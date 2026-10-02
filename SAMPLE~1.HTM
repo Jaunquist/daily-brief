@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Brief</title>
+<style>
+:root{color-scheme:light;--bg:#f6f7f9;--card:#fff;--ink:#1a2233;--muted:#66707f;--line:#e6e9ee;
+ --accent:#1f5eff;--up:#0a8f4d;--down:#d13b3b;--chip:#fbfcfe;
+ --t-ph:#e7f0ff;--t-mk:#e8f7ee;--t-cr:#fdeeee;--t-ai:#f3ecfd;--t-sp:#fff2e2}
+[data-theme=dark]{color-scheme:dark;--bg:#12151c;--card:#1b2029;--ink:#e8ecf3;--muted:#9aa4b2;
+ --line:#2a313d;--accent:#6f9bff;--up:#4cc98a;--down:#f07a7a;--chip:#161b23;
+ --t-ph:#1d2c4d;--t-mk:#15342a;--t-cr:#402024;--t-ai:#2e2247;--t-sp:#3d2e15}
+*{box-sizing:border-box;margin:0}
+body{font:15px/1.55 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+ background:var(--bg);color:var(--ink);padding:20px}
+.wrap{max-width:1080px;margin:0 auto}
+header{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+h1{font-size:22px} .sub{color:var(--muted);font-size:13px}
+#themeBtn{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:999px;
+ padding:6px 14px;font-size:13px;cursor:pointer}
+.grid{display:grid;gap:14px;margin-bottom:14px}
+.g3{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+#liveBadge{font-weight:600;color:var(--accent)}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px}
+.big{font-size:30px;font-weight:700} .muted{color:var(--muted);font-size:12.5px}
+.up{color:var(--up)} .down{color:var(--down)}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;
+ padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:7px 8px;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:none}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+ul.news{list-style:none} ul.news li{padding:7px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+ul.news li:last-child{border-bottom:none}
+.tag{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:999px;margin-right:6px}
+.t-ph{background:var(--t-ph);color:#5b8dff} .t-mk{background:var(--t-mk);color:#2fae6e}
+.t-cr{background:var(--t-cr);color:#e06a6a} .t-ai{background:var(--t-ai);color:#9a6cf5}
+.t-sp{background:var(--t-sp);color:#cf9a3c}
+.gwrap{display:flex;gap:22px;justify-content:space-around;flex-wrap:wrap}
+.gauge{text-align:center} .gauge .val{font-size:15px;font-weight:700}
+.gauge .lab{font-size:12.5px;color:var(--muted)}
+.impl{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:14px;
+ border-top:1px solid var(--line);padding-top:12px}
+.impl h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px}
+.impl ul{margin:0;padding-left:18px;font-size:13px;line-height:1.55}
+.idx{display:flex;gap:10px;flex-wrap:wrap}
+.idx .chip{flex:1 1 140px;background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.chip .n{font-size:12px;color:var(--muted)} .chip .v{font-size:17px;font-weight:700}
+.chip .c{font-size:12.5px;font-weight:600}
+.wx{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0 8px}
+.wx .slot{background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:8px 6px;text-align:center}
+.wx .t{font-size:11px;color:var(--muted);text-transform:uppercase} .wx .e{font-size:20px;margin:2px 0}
+.wx .d{font-size:14px;font-weight:700} .wx .r{font-size:11.5px;color:var(--muted)}
+.golf{font-size:12.5px;background:var(--chip);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+footer{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}
+.gauge svg{max-width:100%;height:auto}
+@media (max-width:480px){
+ body{padding:12px}
+ .grid{gap:12px;margin-bottom:12px}
+ .card{padding:13px;overflow-x:auto}
+ h1{font-size:19px}
+ .big{font-size:26px}
+ table{font-size:12.5px}
+ td,th{padding:6px 5px}
+ .wx .slot{padding:7px 2px}
+ .wx .t,.wx .r{font-size:10px}
+ .idx .chip{flex:1 1 100%}
+ .impl{grid-template-columns:1fr;gap:10px}
+ .impl ul{padding-left:16px}
+ #themeBtn{padding:9px 15px}
+ footer{font-size:11px}
+}
+</style></head><body><div class="wrap">
+<header>
+ <div><h1>Good morning, Justin ☀️</h1>
+ <div class="sub">Thursday, October 1, 2026 · Manila (PHT) · Morning edition 10:30 PM · <span id="liveBadge">…</span></div></div>
+ <button id="themeBtn" onclick="tt()">🌙 Dark</button>
+</header>
+
+<div class="grid g3">
+ <div class="card"><h2>🌦️ Weather — Manila</h2>
+  <div><span class="big">26°C</span> &nbsp;Showers · Humidity 90%</div><div class="wx"><div class="slot"><div class="t">Morning</div><div class="e">⛅</div><div class="d">26°</div><div class="r">Cloudy · 15%</div></div><div class="slot"><div class="t">Afternoon</div><div class="e">⛈️</div><div class="d">29°</div><div class="r">Thunderstorms · 85%</div></div><div class="slot"><div class="t">Evening</div><div class="e">🌧️</div><div class="d">27°</div><div class="r">Rain · 70%</div></div></div>
+  <div class="golf">⛳ <b>Golf outlook:</b> Good window in the morning — only 15% rain. Avoid the afternoon (85%).</div></div>
+ <div class="card"><h2>📅 Today</h2>
+  <table><tr><th colspan="2">Today</th></tr><tr><td class="num" style="white-space:nowrap;vertical-align:top">all day</td><td>Quarterly review prep</td></tr><tr><td class="num" style="white-space:nowrap;vertical-align:top">9:00 AM</td><td>Check Preserve Golf<div class="muted">Preserve Golf Club</div></td></tr><tr><td class="num" style="white-space:nowrap;vertical-align:top">2:00 PM</td><td>Call with Bea</td></tr></table></div>
+ <div class="card"><h2>📊 Snapshot</h2>
+  <div class="idx"><div class="chip"><div class="n">S&P 500</div><div class="v">7,543.55</div><div class="c"><span class="up">+0.81%</span></div></div><div class="chip"><div class="n">Nasdaq</div><div class="v">26,206.89</div><div class="c"><span class="up">+1.30%</span></div></div><div class="chip"><div class="n">VIX</div><div class="v">15.84</div><div class="c"><span class="down">−6.30%</span></div></div></div></div>
+</div>
+
+<div class="grid g2">
+ <div class="card"><h2>🎯 Risk Gauges</h2>
+  <div class="gwrap">
+   <div class="gauge"><svg width="180" height="100" viewBox="0 0 180 100"><path d="M20.0,85.0 A70,70 0 0 1 54.4,24.7" stroke="#3fb46e" stroke-width="14" fill="none"/><path d="M54.4,24.7 A70,70 0 0 1 123.7,23.7" stroke="#f0b429" stroke-width="14" fill="none"/><path d="M123.7,23.7 A70,70 0 0 1 160.0,85.0" stroke="#d13b3b" stroke-width="14" fill="none"/><g transform="rotate(-55.0 90 85)"><line x1="90" y1="85" x2="90" y2="35" stroke="var(--ink)" stroke-width="3.5" stroke-linecap="round"/></g><circle cx="90" cy="85" r="5" fill="var(--ink)"/></svg>
+    <div class="val">Equities: LOW</div><div class="lab">VIX 15.84</div></div>
+   <div class="gauge" id="gauge-cr"><svg width="180" height="100" viewBox="0 0 180 100"><path d="M20.0,85.0 A70,70 0 0 1 40.5,35.5" stroke="#d13b3b" stroke-width="14" fill="none"/><path d="M40.5,35.5 A70,70 0 0 1 79.0,15.9" stroke="#f0b429" stroke-width="14" fill="none"/><path d="M79.0,15.9 A70,70 0 0 1 101.0,15.9" stroke="#9aa4b2" stroke-width="14" fill="none"/><path d="M101.0,15.9 A70,70 0 0 1 139.5,35.5" stroke="#8fd19e" stroke-width="14" fill="none"/><path d="M139.5,35.5 A70,70 0 0 1 160.0,85.0" stroke="#3fb46e" stroke-width="14" fill="none"/><g transform="rotate(-48.6 90 85)"><line x1="90" y1="85" x2="90" y2="35" stroke="var(--ink)" stroke-width="3.5" stroke-linecap="round"/></g><circle cx="90" cy="85" r="5" fill="var(--ink)"/></svg>
+    <div class="val">Crypto: EXTREME FEAR (23)</div><div class="lab">Fear & Greed Index</div></div>
+  </div>
+  <div class="impl">
+   <div><h3>Equities — implications</h3><ul><li>Calm regime: staying invested and adding on dips is the standard playbook.</li><li>Volatility is cheap — a sensible time to buy protection, not sell it.</li><li>Complacency cuts both ways; keep stops honest rather than widening them.</li></ul></div>
+   <div><h3>Crypto — implications</h3><ul id="cr-bullets"><li><b>Main coins (BTC/ETH):</b> extreme fear has historically been an accumulation zone — scale in slowly rather than all at once.</li><li><b>Alt coins (SOL/JUP):</b> highest beta in fear regimes — cut leverage and trim position size until sentiment recovers past ~40.</li><li><b>Meme coins (BONK):</b> most fragile in risk-off tape — keep the allocation small and take profits quickly.</li></ul></div>
+  </div>
+  <div class="muted" style="margin-top:10px">General directional reads from the gauges — not financial advice.</div>
+ </div>
+ <div class="card"><h2>🌐 Policy & Macro</h2>
+  <table>
+   <tr><td>🇵🇭 BSP policy rate</td><td class="num"><b>4.50%</b> · hawkish bias</td></tr>
+   <tr><td>🇺🇸 Fed funds rate</td><td class="num"><b>3.50-3.75%</b> · hold expected</td></tr>
+   <tr><td>🇯🇵 BoJ policy rate</td><td class="num"><b>1.00%</b> · 31-yr high; +25bps seen by year-end</td></tr>
+   <tr><td>🇪🇺 ECB deposit rate</td><td class="num"><b>2.15%</b> · on hold</td></tr>
+  </table>
+  <div class="muted" style="margin-top:8px">Policy rates are maintained in the builder config.</div>
+ </div>
+</div>
+
+<div class="grid g2">
+ <div class="card"><h2>💱 FX — Philippine Peso</h2>
+  <table><tr><th>Pair</th><th class="num">Rate (₱)</th><th>Pair</th><th class="num">Rate (₱)</th></tr>
+  <tr><td>USD/PHP</td><td class="num" data-fx="USD" style="font-weight:700">61.58</td><td>EUR/PHP</td><td class="num" data-fx="EUR">70.37</td></tr><tr><td>GBP/PHP</td><td class="num" data-fx="GBP">82.64</td><td>JPY/PHP ×100</td><td class="num" data-fx="JPY">38.04</td></tr><tr><td>SGD/PHP</td><td class="num" data-fx="SGD">47.69</td><td>AUD/PHP</td><td class="num" data-fx="AUD">42.79</td></tr><tr><td>CNY/PHP</td><td class="num" data-fx="CNY">9.09</td><td>HKD/PHP</td><td class="num" data-fx="HKD">7.85</td></tr></table>
+  <div class="muted" style="margin-top:8px">ECB reference rates via Frankfurter.</div></div>
+ <div class="card"><h2>🪙 Crypto</h2>
+  <table><tr><th>Asset</th><th class="num">Price</th><th class="num">24h</th></tr><tr data-coin="BTC"><td><b>BTC</b> Bitcoin</td><td class="num" data-live="price">$59,978</td><td class="num" data-live="chg"><span class="down">−6.00%</span></td></tr><tr data-coin="ETH"><td><b>ETH</b> Ethereum</td><td class="num" data-live="price">$2,382</td><td class="num" data-live="chg"><span class="up">+33.20%</span></td></tr><tr data-coin="SOL"><td><b>SOL</b> Solana</td><td class="num" data-live="price">$86.36</td><td class="num" data-live="chg"><span class="up">+11.30%</span></td></tr><tr data-coin="BONK"><td><b>BONK</b> Bonk</td><td class="num" data-live="price">$0.00000408</td><td class="num" data-live="chg"><span class="down">−0.20%</span></td></tr><tr data-coin="JUP"><td><b>JUP</b> Jupiter</td><td class="num" data-live="price">$0.00021963</td><td class="num" data-live="chg"><span class="down">−13.40%</span></td></tr></table>
+  <div class="muted" style="margin-top:8px">Coinbase spot, 24h vs same time yesterday.</div></div>
+</div>
+
+<div class="grid g2">
+ <div class="card"><h2>📈 Portfolio</h2><table><tr><th>Holding</th><th class="num">Price</th><th class="num">Value</th><th class="num">Day</th></tr><tr><td><b>VOO</b><div class="muted">12 sh</div></td><td class="num" data-pf="price">$512.30</td><td class="num" data-pf="value">$6,148</td><td class="num" data-pf="pct"><span class="up">+0.80%</span></td></tr><tr><td><b>QQQ</b><div class="muted">5 sh</div></td><td class="num" data-pf="price">$601.15</td><td class="num" data-pf="value">$3,006</td><td class="num" data-pf="pct"><span class="up">+1.20%</span></td></tr><tr data-holding="BTC" data-qty="0.15" data-cost="54000.0"><td><b>BTC</b><div class="muted">0.15 units</div></td><td class="num" data-pf="price">$59,978</td><td class="num" data-pf="value">$8,997</td><td class="num" data-pf="pct"><span class="down">−6.00%</span></td></tr><tr data-holding="SOL" data-qty="40.0" data-cost="72.1"><td><b>SOL</b><div class="muted">40 units</div></td><td class="num" data-pf="price">$86.36</td><td class="num" data-pf="value">$3,454</td><td class="num" data-pf="pct"><span class="up">+11.30%</span></td></tr><tr data-holding="BONK" data-qty="25000000.0" data-cost="3.8e-06"><td><b>BONK</b><div class="muted">25,000,000 units</div></td><td class="num" data-pf="price">$0.00000408</td><td class="num" data-pf="value">$102.12</td><td class="num" data-pf="pct"><span class="down">−0.20%</span></td></tr><tr><td><b>Total</b></td><td></td><td class="num" data-pf="total" data-etf="9153.3500000000"><b>$21,707</b></td><td class="num" data-pf="totalpl" data-etfpl="827.3500000000" data-anypl="1"><b>$2,302</b></td></tr></table><div class="muted" style="margin-top:8px">Crypto revalues live on every open; ETF prices refresh at each build. Last column is day change; the total row shows P&amp;L where cost basis is present.</div></div>
+ <div class="card"><h2>📰 News You Follow</h2><ul class="news"><li><span class="tag t-ph">PH</span>DBCC revises 2026-2030 growth targets</li><li><span class="tag t-cr">Crypto</span>Bitcoin ETFs snap a 10-day outflow streak</li></ul></div>
+</div>
+
+<footer>Sources: Open-Meteo, Frankfurter (ECB), Coinbase, alternative.me, Stooq, Google News.
+Rebuilt automatically each morning at 7:30 AM PHT by GitHub Actions.</footer>
+</div>
+<script>
+function ap(t){document.documentElement.setAttribute('data-theme',t);
+ document.getElementById('themeBtn').textContent=t==='dark'?'☀️ Light':'🌙 Dark';
+ try{parent.postMessage({dailyBriefTheme:t},'*')}catch(e){}}
+function tt(){var t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';
+ try{localStorage.setItem('briefing-theme',t)}catch(e){} ap(t);}
+try{ap(localStorage.getItem('briefing-theme')||'light')}catch(e){ap('light')}
+</script>
+<script>
+(function(){
+var COINS=['BTC','ETH','SOL','BONK','JUP'];
+var FXC=['USD','EUR','JPY','GBP','SGD','AUD','CNY','HKD'];
+var CRB={"ef": ["<b>Main coins (BTC/ETH):</b> extreme fear has historically been an accumulation zone \u2014 scale in slowly rather than all at once.", "<b>Alt coins (SOL/JUP):</b> highest beta in fear regimes \u2014 cut leverage and trim position size until sentiment recovers past ~40.", "<b>Meme coins (BONK):</b> most fragile in risk-off tape \u2014 keep the allocation small and take profits quickly."], "f": ["<b>Main coins:</b> fear without capitulation \u2014 continue scheduled buys, resist the urge to time the exact bottom.", "<b>Alt coins:</b> wait for BTC to stabilise before rotating out of majors; alts usually lag the turn.", "<b>Meme coins:</b> thin liquidity here \u2014 treat any position as speculative and sized to lose."], "n": ["<b>Main coins:</b> neutral tape \u2014 no edge from sentiment; stick to your plan.", "<b>Alt coins:</b> stock-picking matters more than beta in this zone; favour names with real volume.", "<b>Meme coins:</b> no sentiment tailwind \u2014 nothing here demands action."], "g": ["<b>Main coins:</b> greed building \u2014 let winners run but start defining where you would take profit.", "<b>Alt coins:</b> this is where alts typically outperform; also where chasing gets expensive.", "<b>Meme coins:</b> rallies are fastest and shortest here \u2014 pre-commit an exit before entering."], "eg": ["<b>Main coins:</b> extreme greed historically precedes drawdowns \u2014 consider trimming into strength.", "<b>Alt coins:</b> late-cycle behaviour; tighten stops and bank partial profits.", "<b>Meme coins:</b> maximum froth \u2014 the worst risk/reward of the three buckets."]};
+var CRZ=[[25,'#d13b3b'],[45,'#f0b429'],[55,'#9aa4b2'],[75,'#8fd19e'],[100,'#3fb46e']];
+var ok=0, LIVEPX={}, LIVECHG={};
+
+function money(v){
+  if(v==null||isNaN(v)) return '\u2014';
+  if(v>=1000) return '$'+v.toLocaleString(undefined,{maximumFractionDigits:0});
+  if(v>=1) return '$'+v.toFixed(2);
+  return '$'+v.toFixed(8).replace(/0+$/,'');
+}
+function pct(v){
+  if(v==null||isNaN(v)) return '<span class="muted">\u2014</span>';
+  return '<span class="'+(v>=0?'up':'down')+'">'+(v>=0?'+':'\u2212')+Math.abs(v).toFixed(2)+'%</span>';
+}
+function badge(t){ var e=document.getElementById('liveBadge'); if(e) e.textContent=t; }
+
+async function coin(sym){
+  var y=new Date(Date.now()-86400000).toISOString().slice(0,10);
+  var a=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot',{cache:'no-store'});
+  if(!a.ok) throw new Error('spot');
+  var now=parseFloat((await a.json()).data.amount), chg=null;
+  try{
+    var b=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot?date='+y,{cache:'no-store'});
+    if(b.ok){ var prev=parseFloat((await b.json()).data.amount); if(prev) chg=(now-prev)/prev*100; }
+  }catch(e){}
+  var row=document.querySelector('tr[data-coin="'+sym+'"]'); if(!row) return;
+  var pc=row.querySelector('[data-live=price]'), cc=row.querySelector('[data-live=chg]');
+  if(pc) pc.textContent=money(now);
+  if(cc) cc.innerHTML=pct(chg);
+  LIVEPX[sym]=now; LIVECHG[sym]=chg;
+}
+
+// Revalue crypto holdings from the live prices, then re-add the ETF subtotal
+// the builder computed, so the Total line stays correct.
+function revaluePortfolio(){
+  var rows=document.querySelectorAll('tr[data-holding]');
+  if(!rows.length) return;
+  var sum=0, pl=0, sawPl=false;
+  rows.forEach(function(r){
+    var sym=r.getAttribute('data-holding');
+    var qty=parseFloat(r.getAttribute('data-qty'));
+    var cost=parseFloat(r.getAttribute('data-cost'));
+    var px=LIVEPX[sym];
+    if(px==null||isNaN(qty)) return;
+    var val=px*qty; sum+=val;
+    if(!isNaN(cost)){ pl+=(px-cost)*qty; sawPl=true; }
+    var a=r.querySelector('[data-pf=price]'), b=r.querySelector('[data-pf=value]'),
+        c=r.querySelector('[data-pf=pct]');
+    if(a) a.textContent=money(px);
+    if(b) b.textContent=money(val);
+    if(c) c.innerHTML=pct(LIVECHG[sym]);
+  });
+  var tc=document.querySelector('[data-pf=total]');
+  if(tc){
+    var etf=parseFloat(tc.getAttribute('data-etf'))||0;
+    tc.innerHTML='<b>'+money(sum+etf)+'</b>';
+  }
+  var pc2=document.querySelector('[data-pf=totalpl]');
+  if(pc2 && pc2.getAttribute('data-anypl')==='1'){
+    var etfpl=parseFloat(pc2.getAttribute('data-etfpl'))||0;
+    if(sawPl||etfpl) pc2.innerHTML='<b>'+money(pl+etfpl)+'</b>';
+  }
+}
+async function doCrypto(){
+  try{ await Promise.all(COINS.map(coin)); ok++; }catch(e){}
+  try{ revaluePortfolio(); }catch(e){}
+}
+
+async function doFx(){
+  try{
+    var r=await fetch('https://api.frankfurter.app/latest?from=PHP&to='+FXC.join(','),{cache:'no-store'});
+    if(!r.ok) throw new Error('fx');
+    var rates=(await r.json()).rates;
+    FXC.forEach(function(k){
+      var v=rates[k]; if(!v) return;
+      var php=1/v; if(k==='JPY') php*=100;
+      var el=document.querySelector('[data-fx="'+k+'"]');
+      if(el) el.textContent=php.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    });
+    ok++;
+  }catch(e){}
+}
+
+function gaugeSvg(score){
+  var cx=90,cy=85,r=70,segs='',frm=0;
+  function pt(v){ var a=Math.PI*(1-v/100); return [cx+r*Math.cos(a), cy-r*Math.sin(a)]; }
+  CRZ.forEach(function(z){
+    var p1=pt(frm), p2=pt(z[0]);
+    segs+='<path d="M'+p1[0].toFixed(1)+','+p1[1].toFixed(1)+' A70,70 0 0 1 '+
+          p2[0].toFixed(1)+','+p2[1].toFixed(1)+'" stroke="'+z[1]+'" stroke-width="14" fill="none"/>';
+    frm=z[0];
+  });
+  var ang=-90+score/100*180;
+  return '<svg width="180" height="100" viewBox="0 0 180 100">'+segs+
+    '<g transform="rotate('+ang.toFixed(1)+' 90 85)"><line x1="90" y1="85" x2="90" y2="35" '+
+    'stroke="var(--ink)" stroke-width="3.5" stroke-linecap="round"/></g>'+
+    '<circle cx="90" cy="85" r="5" fill="var(--ink)"/></svg>';
+}
+
+async function doFng(){
+  try{
+    var r=await fetch('https://api.alternative.me/fng/',{cache:'no-store'});
+    if(!r.ok) throw new Error('fng');
+    var d=(await r.json()).data[0], v=parseInt(d.value,10), lab=d.value_classification;
+    if(isNaN(v)) throw new Error('fng');
+    var g=document.getElementById('gauge-cr');
+    if(g) g.innerHTML=gaugeSvg(v)+
+      '<div class="val">Crypto: '+lab.toUpperCase()+' ('+v+')</div>'+
+      '<div class="lab">Fear &amp; Greed Index</div>';
+    var b = v<=25?'ef' : v<=45?'f' : v<=55?'n' : v<=75?'g' : 'eg';
+    var ul=document.getElementById('cr-bullets');
+    if(ul&&CRB[b]) ul.innerHTML=CRB[b].map(function(x){return '<li>'+x+'</li>';}).join('');
+    ok++;
+  }catch(e){}
+}
+
+async function refresh(){
+  ok=0; badge('refreshing\u2026');
+  await Promise.all([doCrypto(), doFx(), doFng()]);
+  if(ok===0){ badge('offline \u2014 morning build'); return; }
+  var t=new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+  badge(ok===3 ? ('live \u00b7 '+t) : ('partly live \u00b7 '+t));
+}
+
+refresh();
+var last=Date.now();
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState==='visible' && Date.now()-last>120000){ last=Date.now(); refresh(); }
+});
+})();
+</script></body></html>
