@@ -58,6 +58,13 @@ FEEDS = [
 COINS = [("BTC", "Bitcoin"), ("ETH", "Ethereum"), ("SOL", "Solana"),
          ("BONK", "Bonk"), ("JUP", "Jupiter")]
 
+# Coinbase's JUP feed tracks an unrelated Ethereum "Jupiter Project" token, not
+# Solana's JUP. It gets outvoted by the median rather than special-cased.
+CG_IDS = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+          "BONK": "bonk", "JUP": "jupiter-exchange-solana"}
+BN_SYMS = {c: c + "USDT" for c, _ in COINS}
+OUTLIER_TOLERANCE = 0.25      # drop a source >25% away from the median
+
 FX = ["USD", "EUR", "JPY", "GBP", "SGD", "AUD", "CNY", "HKD"]
 
 
@@ -88,8 +95,9 @@ def weather():
            f"?latitude={CITY['lat']}&longitude={CITY['lon']}"
            "&hourly=temperature_2m,precipitation_probability,weather_code"
            "&current=temperature_2m,relative_humidity_2m,weather_code"
-           "&daily=temperature_2m_max,temperature_2m_min"
-           "&timezone=Asia%2FManila&forecast_days=1")
+           "&daily=weather_code,temperature_2m_max,temperature_2m_min,"
+           "precipitation_probability_max,precipitation_sum,wind_speed_10m_max"
+           "&timezone=Asia%2FManila&forecast_days=6")
     r = get(url)
     if not r:
         return None
@@ -108,6 +116,23 @@ def weather():
         return None
 
     daily = j.get("daily", {})
+
+    # Next five days, not today. forecast_days=6 is what makes the fifth reachable.
+    days = []
+    dtimes = daily.get("time", [])
+    for i in range(1, min(6, len(dtimes))):
+        code = daily.get("weather_code", [None] * 6)[i]
+        ddesc, demoji = WMO.get(code, ("—", "\U0001F321️"))
+        dd = dt.date.fromisoformat(dtimes[i])
+        days.append({"name": dd.strftime("%a"), "emoji": demoji, "desc": ddesc,
+                      "hi": round(daily["temperature_2m_max"][i]),
+                      "lo": round(daily["temperature_2m_min"][i]),
+                      "pop": daily.get("precipitation_probability_max", [None] * 6)[i],
+                      "mm": daily.get("precipitation_sum", [None] * 6)[i],
+                      "wind": daily.get("wind_speed_10m_max", [None] * 6)[i],
+                      "code": code,
+                      "label": dd.strftime("%a %-d").upper()})
+
     cdesc, cemoji = WMO.get(cur.get("weather_code"), ("—", "\U0001F321️"))
     return {
         "temp": round(cur.get("temperature_2m", 0)),
@@ -116,26 +141,50 @@ def weather():
         "hi": round(daily.get("temperature_2m_max", [0])[0]),
         "lo": round(daily.get("temperature_2m_min", [0])[0]),
         "morning": slot(8), "afternoon": slot(14), "evening": slot(19),
+        "days": days,
     }
 
 
-def golf_line(w):
-    if not w:
-        return "Weather unavailable — check before heading out."
-    parts = [("morning", w.get("morning")), ("afternoon", w.get("afternoon")),
-             ("evening", w.get("evening"))]
-    scored = [(p, s) for p, s in parts if s]
-    if not scored:
-        return "Hourly detail unavailable today."
-    best = min(scored, key=lambda ps: ps[1]["pop"])
-    worst = max(scored, key=lambda ps: ps[1]["pop"])
-    if best[1]["pop"] <= 20:
-        return (f"Good window in the {best[0]} — only {best[1]['pop']}% rain. "
-                f"Avoid the {worst[0]} ({worst[1]['pop']}%).")
-    if best[1]["pop"] <= 50:
-        return (f"{best[0].capitalize()} is your driest shot at {best[1]['pop']}% rain, "
-                f"but keep an eye on the radar.")
-    return f"Wet all day — lowest is the {best[0]} at {best[1]['pop']}%. Probably an indoor one."
+def weather_alerts(w):
+    """Flag thunderstorms, heavy rain, strong wind and heat across the 5-day window.
+    Open-Meteo carries no PAGASA bulletins, so tropical cyclones and LPAs cannot be
+    detected here - the last line says so rather than implying an all-clear."""
+    if not w or not w.get("days"):
+        return []
+    storm, heavy, windy, hot = [], [], [], []
+    for d in w["days"]:
+        nm = d["name"]
+        if (d.get("code") or 0) >= 95:
+            storm.append(nm)
+        if (d.get("mm") or 0) >= 20 or (d.get("pop") or 0) >= 95:
+            heavy.append(nm)
+        if (d.get("wind") or 0) >= 40:
+            windy.append(nm)
+        if (d.get("hi") or 0) >= 36:
+            hot.append(nm)
+
+    def phrase(ds):
+        return ds[0] if len(ds) == 1 else ", ".join(ds[:-1]) + " and " + ds[-1]
+
+    out = []
+    if storm:
+        out.append("\u26C8\ufe0f Thunderstorms expected " + phrase(storm) + ".")
+    if heavy:
+        mx = max((d.get("mm") or 0) for d in w["days"])
+        out.append("\U0001F327\ufe0f Heavy rain " + phrase(heavy)
+                   + f" \u2014 up to {mx:.0f} mm in a day.")
+    if windy:
+        mx = max((d.get("wind") or 0) for d in w["days"])
+        out.append("\U0001F32C\ufe0f Strong wind " + phrase(windy)
+                   + f", peaking near {mx:.0f} km/h.")
+    if hot:
+        mx = max((d.get("hi") or 0) for d in w["days"])
+        out.append(f"\U0001F321\ufe0f Heat reaching {mx}""\u00b0""C " + phrase(hot) + ".")
+    if not out:
+        out.append("No thunderstorms, damaging wind or extreme heat in the next five days.")
+    out.append("Open-Meteo carries no PAGASA bulletins \u2014 check PAGASA for LPAs and "
+               "tropical cyclones.")
+    return out
 
 
 # ----------------------------------------------------------------- markets
@@ -153,15 +202,21 @@ def fx():
     return out
 
 
-def crypto():
-    y = (NOW - dt.timedelta(days=1)).strftime("%Y-%m-%d")
-    rows = []
-    for sym, name in COINS:
+def _median(xs):
+    xs = sorted(xs)
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def cb_prices():
+    """Coinbase spot, plus yesterday's spot to derive a 24h change."""
+    out, y = {}, (NOW - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    for sym, _ in COINS:
         r = get(f"https://api.coinbase.com/v2/prices/{sym}-USD/spot")
         if not r:
             continue
         try:
-            now_p = float(r.json()["data"]["amount"])
+            px = float(r.json()["data"]["amount"])
         except Exception:
             continue
         chg = None
@@ -170,13 +225,86 @@ def crypto():
             try:
                 prev = float(ry.json()["data"]["amount"])
                 if prev:
-                    chg = (now_p - prev) / prev * 100
+                    chg = (px - prev) / prev * 100
             except Exception:
                 pass
-        rows.append({"sym": sym, "name": name, "price": now_p, "chg": chg})
-    if rows:
-        print("  crypto: " + ", ".join(f"{r['sym']}={r['price']:.6f}".rstrip("0").rstrip(".")
-                                       for r in rows))
+        out[sym] = (px, chg)
+    return out
+
+
+def cg_prices():
+    ids = ",".join(CG_IDS[c] for c, _ in COINS)
+    r = get("https://api.coingecko.com/api/v3/simple/price"
+            f"?ids={ids}&vs_currencies=usd&include_24hr_change=true")
+    if not r:
+        return {}
+    out = {}
+    try:
+        j = r.json()
+    except Exception:
+        return {}
+    for sym, _ in COINS:
+        d = j.get(CG_IDS[sym])
+        if d and d.get("usd"):
+            out[sym] = (float(d["usd"]), d.get("usd_24h_change"))
+    return out
+
+
+def bn_prices():
+    import urllib.parse as up
+    syms = up.quote(json.dumps([BN_SYMS[c] for c, _ in COINS], separators=(",", ":")))
+    out = {}
+    for host in ("https://data-api.binance.vision", "https://api.binance.com"):
+        r = get(f"{host}/api/v3/ticker/24hr?symbols={syms}")
+        if not r:
+            continue
+        try:
+            rev = {v: k for k, v in BN_SYMS.items()}
+            for row in r.json():
+                sym = rev.get(row.get("symbol"))
+                if not sym:
+                    continue
+                out[sym] = (float(row["lastPrice"]), float(row["priceChangePercent"]))
+            if out:
+                return out
+        except Exception:
+            continue
+    return out
+
+
+def crypto():
+    """Median of Coinbase, CoinGecko and Binance; sources >25% off are discarded."""
+    feeds = {"CB": cb_prices(), "CG": cg_prices(), "BN": bn_prices()}
+    live = [k for k, v in feeds.items() if v]
+    print(f"  crypto sources reachable: {', '.join(live) if live else 'none'}")
+
+    rows = []
+    for sym, name in COINS:
+        quotes = {k: v[sym] for k, v in feeds.items() if sym in v}
+        if not quotes:
+            rows.append({"sym": sym, "name": name, "price": None, "chg": None,
+                         "srcs": 0, "total": len(feeds), "dropped": []})
+            continue
+        prices = [q[0] for q in quotes.values()]
+        med = _median(prices)
+        kept, dropped = {}, []
+        for k, (px, ch) in quotes.items():
+            if med and abs(px - med) / med > OUTLIER_TOLERANCE:
+                dropped.append(k)
+            else:
+                kept[k] = (px, ch)
+        if not kept:                       # everything disagreed; fall back to raw median
+            kept, dropped = quotes, []
+        final_px = _median([v[0] for v in kept.values()])
+        chs = [v[1] for v in kept.values() if v[1] is not None]
+        rows.append({"sym": sym, "name": name, "price": final_px,
+                     "chg": _median(chs) if chs else None,
+                     "srcs": len(kept), "total": len(quotes), "dropped": sorted(dropped)})
+    for r in rows:
+        if r["price"] is not None:
+            note = f" (dropped {'+'.join(r['dropped'])})" if r["dropped"] else ""
+            print(f"    {r['sym']}={r['price']:.8f}".rstrip("0").rstrip(".")
+                  + f" [{r['srcs']}/{r['total']}]{note}")
     return rows
 
 
@@ -561,6 +689,21 @@ def crypto_gauge(fg):
             "sub": "Fear & Greed Index", "bullets": CR_BUCKETS[fg_bucket(v)]}
 
 
+def ph_indicators():
+    """Local PSA figures. There is no public PSA API, so ph_data.json is the source."""
+    try:
+        d = json.loads(io.open("ph_data.json", encoding="utf-8").read())
+    except Exception as e:
+        print(f"  ! ph_data.json unreadable: {type(e).__name__}", file=sys.stderr)
+        return None
+    for k in ("inflation", "unemployment"):
+        if isinstance(d.get(k), dict):
+            d[k]["series"] = (d[k].get("series") or [])[-9:]     # cap at 9 months
+    print(f"  ph indicators: {len(d.get('inflation', {}).get('series', []))} inflation, "
+          f"{len(d.get('unemployment', {}).get('series', []))} unemployment")
+    return d
+
+
 # -------------------------------------------------------------------- news
 def news():
     items = []
@@ -612,6 +755,66 @@ EQ_ZONES = [(33, "#3fb46e"), (66, "#f0b429"), (100, "#d13b3b")]
 CR_ZONES = [(25, "#d13b3b"), (45, "#f0b429"), (55, "#9aa4b2"), (75, "#8fd19e"), (100, "#3fb46e")]
 
 
+def bar_svg(series, lo=None, hi=None, unit="%"):
+    """Vertical bars with an optional shaded target band. Scales to the card."""
+    if not series:
+        return '<div class="muted">No data.</div>'
+    vals = [v for _, v in series]
+    top = max(vals + ([hi] if hi else [])) * 1.18
+    W, H, PAD_B, PAD_T = 320, 110, 18, 6
+    bw = W / len(series)
+    body = ""
+    if lo is not None and hi is not None and top:
+        y1 = PAD_T + (1 - hi / top) * (H - PAD_B - PAD_T)
+        y2 = PAD_T + (1 - lo / top) * (H - PAD_B - PAD_T)
+        body += (f'<rect x="0" y="{y1:.1f}" width="{W}" height="{max(0,y2-y1):.1f}" '
+                 f'fill="var(--up)" opacity=".12"/>')
+    for i, (lbl, v) in enumerate(series):
+        h = (v / top) * (H - PAD_B - PAD_T) if top else 0
+        x = i * bw + bw * 0.18
+        y = H - PAD_B - h
+        over = (hi is not None and v > hi)
+        col = "var(--down)" if over else "var(--accent)"
+        body += (f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw*0.64:.1f}" height="{max(h,1):.1f}" '
+                 f'rx="2" fill="{col}"/>'
+                 f'<text x="{x + bw*0.32:.1f}" y="{y-2.5:.1f}" text-anchor="middle" '
+                 f'font-size="8.5" fill="var(--muted)">{v:g}</text>'
+                 f'<text x="{x + bw*0.32:.1f}" y="{H-6:.1f}" text-anchor="middle" '
+                 f'font-size="8" fill="var(--muted)">{lbl}</text>')
+    return (f'<svg viewBox="0 0 {W} {H}" style="width:100%;height:auto" '
+            f'role="img" aria-label="bar chart">{body}</svg>')
+
+
+def line_svg(series, unit="%"):
+    if not series:
+        return '<div class="muted">No data.</div>'
+    vals = [v for _, v in series]
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 1
+    W, H, PAD_B, PAD_T = 320, 96, 18, 10
+    step = W / max(len(series) - 1, 1)
+    pts, dots = [], ""
+    for i, (lbl, v) in enumerate(series):
+        x = i * step
+        y = PAD_T + (1 - (v - lo) / span) * (H - PAD_B - PAD_T)
+        pts.append(f"{x:.1f},{y:.1f}")
+        dots += (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.6" fill="var(--accent)"/>'
+                 f'<text x="{x:.1f}" y="{y-6:.1f}" text-anchor="middle" font-size="8.5" '
+                 f'fill="var(--muted)">{v:g}</text>'
+                 f'<text x="{x:.1f}" y="{H-5:.1f}" text-anchor="middle" font-size="8" '
+                 f'fill="var(--muted)">{lbl}</text>')
+    return (f'<svg viewBox="0 0 {W} {H}" style="width:100%;height:auto" role="img" '
+            f'aria-label="line chart"><polyline points="{" ".join(pts)}" fill="none" '
+            f'stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>{dots}</svg>')
+
+
+def mon(lbl):
+    try:
+        return dt.date.fromisoformat(lbl + "-01").strftime("%b")
+    except Exception:
+        return lbl
+
+
 def pct_html(v, suffix="%"):
     if v is None:
         return '<span class="muted">—</span>'
@@ -659,55 +862,90 @@ function pct(v){
 }
 function badge(t){ var e=document.getElementById('liveBadge'); if(e) e.textContent=t; }
 
-async function coin(sym){
-  var y=new Date(Date.now()-86400000).toISOString().slice(0,10);
-  var a=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot',{cache:'no-store'});
-  if(!a.ok) throw new Error('spot');
-  var now=parseFloat((await a.json()).data.amount), chg=null;
-  try{
-    var b=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot?date='+y,{cache:'no-store'});
-    if(b.ok){ var prev=parseFloat((await b.json()).data.amount); if(prev) chg=(now-prev)/prev*100; }
-  }catch(e){}
-  var row=document.querySelector('tr[data-coin="'+sym+'"]'); if(!row) return;
-  var pc=row.querySelector('[data-live=price]'), cc=row.querySelector('[data-live=chg]');
-  if(pc) pc.textContent=money(now);
-  if(cc) cc.innerHTML=pct(chg);
-  LIVEPX[sym]=now; LIVECHG[sym]=chg;
+var CG_IDS={BTC:'bitcoin',ETH:'ethereum',SOL:'solana',BONK:'bonk',JUP:'jupiter-exchange-solana'};
+var TOL=0.25;
+
+function median(a){ a=a.slice().sort(function(x,y){return x-y;}); var m=a.length>>1;
+  return a.length%2 ? a[m] : (a[m-1]+a[m])/2; }
+
+async function cbAll(){
+  var y=new Date(Date.now()-86400000).toISOString().slice(0,10), out={};
+  await Promise.all(COINS.map(async function(sym){
+    try{
+      var a=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot',{cache:'no-store'});
+      if(!a.ok) return;
+      var px=parseFloat((await a.json()).data.amount), ch=null;
+      try{
+        var b=await fetch('https://api.coinbase.com/v2/prices/'+sym+'-USD/spot?date='+y,{cache:'no-store'});
+        if(b.ok){ var p=parseFloat((await b.json()).data.amount); if(p) ch=(px-p)/p*100; }
+      }catch(e){}
+      if(!isNaN(px)) out[sym]=[px,ch];
+    }catch(e){}
+  }));
+  return out;
 }
 
-// Revalue crypto holdings from the live prices, then re-add the ETF subtotal
-// the builder computed, so the Total line stays correct.
-function revaluePortfolio(){
-  var rows=document.querySelectorAll('tr[data-holding]');
-  if(!rows.length) return;
-  var sum=0, pl=0, sawPl=false;
-  rows.forEach(function(r){
-    var sym=r.getAttribute('data-holding');
-    var qty=parseFloat(r.getAttribute('data-qty'));
-    var cost=parseFloat(r.getAttribute('data-cost'));
-    var px=LIVEPX[sym];
-    if(px==null||isNaN(qty)) return;
-    var val=px*qty; sum+=val;
-    if(!isNaN(cost)){ pl+=(px-cost)*qty; sawPl=true; }
-    var a=r.querySelector('[data-pf=price]'), b=r.querySelector('[data-pf=value]'),
-        c=r.querySelector('[data-pf=pct]');
-    if(a) a.textContent=money(px);
-    if(b) b.textContent=money(val);
-    if(c) c.innerHTML=pct(LIVECHG[sym]);
-  });
-  var tc=document.querySelector('[data-pf=total]');
-  if(tc){
-    var etf=parseFloat(tc.getAttribute('data-etf'))||0;
-    tc.innerHTML='<b>'+money(sum+etf)+'</b>';
-  }
-  var pc2=document.querySelector('[data-pf=totalpl]');
-  if(pc2 && pc2.getAttribute('data-anypl')==='1'){
-    var etfpl=parseFloat(pc2.getAttribute('data-etfpl'))||0;
-    if(sawPl||etfpl) pc2.innerHTML='<b>'+money(pl+etfpl)+'</b>';
-  }
+async function cgAll(){
+  var out={};
+  try{
+    var ids=COINS.map(function(c){return CG_IDS[c];}).join(',');
+    var r=await fetch('https://api.coingecko.com/api/v3/simple/price?ids='+ids+
+                      '&vs_currencies=usd&include_24hr_change=true',{cache:'no-store'});
+    if(!r.ok) return out;
+    var j=await r.json();
+    COINS.forEach(function(sym){
+      var d=j[CG_IDS[sym]];
+      if(d&&d.usd) out[sym]=[d.usd, (d.usd_24h_change==null?null:d.usd_24h_change)];
+    });
+  }catch(e){}
+  return out;
 }
+
+async function bnAll(){
+  var out={};
+  var syms=encodeURIComponent(JSON.stringify(COINS.map(function(c){return c+'USDT';})));
+  for (const host of ['https://data-api.binance.vision','https://api.binance.com']) {
+    try{
+      var r=await fetch(host+'/api/v3/ticker/24hr?symbols='+syms,{cache:'no-store'});
+      if(!r.ok) continue;
+      (await r.json()).forEach(function(row){
+        var sym=row.symbol.replace(/USDT$/,'');
+        if(COINS.indexOf(sym)>=0) out[sym]=[parseFloat(row.lastPrice), parseFloat(row.priceChangePercent)];
+      });
+      if(Object.keys(out).length) return out;
+    }catch(e){}
+  }
+  return out;
+}
+
 async function doCrypto(){
-  try{ await Promise.all(COINS.map(coin)); ok++; }catch(e){}
+  var feeds;
+  try{ feeds = {CB: await cbAll(), CG: await cgAll(), BN: await bnAll()}; }
+  catch(e){ return; }
+  var any=false;
+  COINS.forEach(function(sym){
+    var q={};
+    Object.keys(feeds).forEach(function(k){ if(feeds[k][sym]) q[k]=feeds[k][sym]; });
+    var names=Object.keys(q);
+    if(!names.length) return;
+    var med=median(names.map(function(k){return q[k][0];}));
+    var kept=[], dropped=[];
+    names.forEach(function(k){
+      if(med && Math.abs(q[k][0]-med)/med > TOL) dropped.push(k); else kept.push(k);
+    });
+    if(!kept.length){ kept=names; dropped=[]; }
+    var px=median(kept.map(function(k){return q[k][0];}));
+    var chs=kept.map(function(k){return q[k][1];}).filter(function(v){return v!=null&&!isNaN(v);});
+    var ch=chs.length?median(chs):null;
+    LIVEPX[sym]=px; LIVECHG[sym]=ch; any=true;
+    var row=document.querySelector('tr[data-coin="'+sym+'"]'); if(!row) return;
+    var a=row.querySelector('[data-live=price]'), b=row.querySelector('[data-live=chg]'),
+        c=row.querySelector('[data-live=src]');
+    if(a) a.textContent=money(px);
+    if(b) b.innerHTML=pct(ch);
+    if(c) c.textContent=kept.length+'/'+names.length+(dropped.length?' \u00b7 '+dropped.join('+')+' off':'');
+  });
+  if(any) ok++;
   try{ revaluePortfolio(); }catch(e){}
 }
 
@@ -787,12 +1025,24 @@ def build_html(d):
                 f'<div class="d">{s["temp"]}°</div>'
                 f'<div class="r">{esc(s["desc"])} · {s["pop"]}%</div></div>')
 
+    def day_cell(dd):
+        rain = f'{dd["pop"]}%' if dd["pop"] is not None else ""
+        mm = (f'<span class="mm"> · {dd["mm"]:.1f}mm</span>'
+              if dd.get("mm") else "")
+        return (f'<div class="d"><div class="dn">{esc(dd.get("label") or dd["name"])}</div>'
+                f'<div class="dt"><span class="de">{dd["emoji"]}</span>'
+                f'{dd["lo"]}–{dd["hi"]}°</div>'
+                f'<div class="dr">{esc(rain)}{mm}</div></div>')
+
     wx = ""
     if w:
         wx = (f'<div><span class="big">{w["temp"]}°C</span> &nbsp;{esc(w["desc"])}'
               f' · Humidity {w["humidity"]}%</div>'
               f'<div class="wx">{wx_slot("Morning", w["morning"])}'
               f'{wx_slot("Afternoon", w["afternoon"])}{wx_slot("Evening", w["evening"])}</div>')
+        if w.get("days"):
+            wx += ('<div class="fcl">Next 5 days</div><div class="fc5">'
+                   + "".join(day_cell(x) for x in w["days"]) + "</div>")
     else:
         wx = '<div class="muted">Weather unavailable.</div>'
 
@@ -811,11 +1061,19 @@ def build_html(d):
         fx_rows += (f'<tr><td>{l1}</td><td class="num" data-fx="{k1}"{bold}>{f1}</td>'
                     f'<td>{l2}</td>{c2}</tr>')
 
+    def src_cell(c):
+        if not c or not c.get("total"):
+            return "—"
+        return (f'{c["srcs"]}/{c["total"]}'
+                + (f' · {"+".join(c["dropped"])} off' if c.get("dropped") else ""))
+
     have = {c["sym"]: c for c in (d["crypto"] or [])}
     cr_rows = "".join(
         f'<tr data-coin="{sym}"><td><b>{sym}</b> {esc(name)}</td>'
         f'<td class="num" data-live="price">{money(have[sym]["price"]) if sym in have else "—"}</td>'
-        f'<td class="num" data-live="chg">{pct_html(have[sym]["chg"]) if sym in have else "—"}</td></tr>'
+        f'<td class="num" data-live="chg">{pct_html(have[sym]["chg"]) if sym in have else "—"}</td>'
+        f'<td class="num" data-live="src" style="color:var(--muted);font-size:11.5px">'
+        f'{src_cell(have.get(sym))}</td></tr>'
         for sym, name in COINS
     )
 
@@ -829,8 +1087,12 @@ def build_html(d):
                 f'<div class="v">{fmt.format(v["close"])}</div>'
                 f'<div class="c">{pct_html(v["pct"])}</div></div>')
 
+    import urllib.parse as _up
     news_items = "".join(
-        f'<li><span class="tag t-{n["cls"]}">{esc(n["tag"])}</span>{esc(n["title"])}</li>'
+        f'<li><span class="tag t-{n["cls"]}">{esc(n["tag"])}</span>'
+        f'<a href="https://www.google.com/search?q={_up.quote_plus(n["title"])}" '
+        f'target="_blank" rel="noopener noreferrer">{esc(n["title"])}'
+        f'<span class="ext">\u2197</span></a></li>'
         for n in (d["news"] or [])
     ) or '<li class="muted">No headlines retrieved.</li>'
 
@@ -903,6 +1165,58 @@ def build_html(d):
                      'open; ETF prices refresh at each build. Last column is day change; the '
                      'total row shows P&amp;L where cost basis is present.</div>')
 
+    # Global Snapshot TLDR - only facts that changed, never static explanation.
+    tl = []
+    for key, nm in (("spx", "S&P 500"), ("ndq", "Nasdaq")):
+        v = (d.get("indices") or {}).get(key)
+        if v and v.get("pct") is not None:
+            tl.append(f'{nm} {"rose" if v["pct"] >= 0 else "fell"} '
+                      f'{abs(v["pct"]):.2f}% to {v["close"]:,.0f}.')
+    vx = (d.get("indices") or {}).get("vix")
+    if vx:
+        lvl = "calm" if vx["close"] < 16 else ("unsettled" if vx["close"] < 25 else "stressed")
+        tl.append(f'VIX at {vx["close"]:.2f} \u2014 volatility {lvl}.')
+    if d.get("cr") and "UNKNOWN" not in d["cr"]["label"]:
+        tl.append(d["cr"]["label"].replace("Crypto: ", "Crypto sentiment ").capitalize() + ".")
+    tl.append(f'Policy: BSP {RATES["bsp"][0]} ({RATES["bsp"][1]}), Fed {RATES["fed"][0]}, '
+              f'BoJ {RATES["boj"][0]}, ECB {RATES["ecb"][0]}.')
+    tldr = '<div class="note"><b>TL;DR</b><ul>' + "".join(f"<li>{x}</li>" for x in tl) + "</ul></div>"
+
+    # Weather alert note
+    al = d.get("alerts") or []
+    wx_note = ('<div class="note"><b>Outlook</b><ul>'
+               + "".join(f"<li>{esc(x)}</li>" for x in al) + "</ul></div>") if al else ""
+
+    # PH indicators
+    ph = d.get("ph")
+    if not ph:
+        ph_html = '<div class="muted">ph_data.json not found.</div>'
+    else:
+        ph_html = ""
+        inf = ph.get("inflation") or {}
+        if inf.get("series"):
+            ph_html += ('<div class="chartblk"><h4>' + esc(inf.get("label", "Inflation"))
+                        + "</h4>"
+                        + bar_svg([(mon(k), v) for k, v in inf["series"]],
+                                  lo=inf.get("target_low"), hi=inf.get("target_high"))
+                        + '<div class="cap">Shaded band is the BSP 2\u20134% target. '
+                          'Red bars are prints above it.</div></div>')
+        un = ph.get("unemployment") or {}
+        if un.get("series"):
+            ph_html += ('<div class="chartblk"><h4>' + esc(un.get("label", "Unemployment"))
+                        + "</h4>" + line_svg([(mon(k), v) for k, v in un["series"]])
+                        + '<div class="cap">PSA Labour Force Survey.</div></div>')
+        ba = ph.get("barista") or {}
+        if ba.get("value") is not None:
+            ph_html += ('<div class="chartblk"><h4>' + esc(ba.get("label", "Barista Index"))
+                        + f'</h4><div class="big">{esc(str(ba["value"]))}'
+                        + esc(ba.get("unit", "")) + "</div>"
+                        + f'<div class="cap">{esc(ba.get("blurb", ""))}'
+                        + (f' · as of {esc(ba["asof"])}' if ba.get("asof") else "")
+                        + "</div></div>")
+        if not ph_html:
+            ph_html = '<div class="muted">No Philippine series populated yet.</div>'
+
     eq_bul = "".join(f"<li>{b}</li>" for b in g_eq["bullets"])
     cr_bul = "".join(f"<li>{b}</li>" for b in g_cr["bullets"])
 
@@ -913,10 +1227,12 @@ def build_html(d):
 <style>
 :root{{color-scheme:light;--bg:#f6f7f9;--card:#fff;--ink:#1a2233;--muted:#66707f;--line:#e6e9ee;
  --accent:#1f5eff;--up:#0a8f4d;--down:#d13b3b;--chip:#fbfcfe;
- --t-ph:#e7f0ff;--t-mk:#e8f7ee;--t-cr:#fdeeee;--t-ai:#f3ecfd;--t-sp:#fff2e2}}
+ --t-ph:#e7f0ff;--t-mk:#e8f7ee;--t-cr:#fdeeee;--t-ai:#f3ecfd;--t-sp:#fff2e2;
+ --warn:#fff8e6;--warn-bd:#e9c46a;--warn-ink:#6b5518}}
 [data-theme=dark]{{color-scheme:dark;--bg:#12151c;--card:#1b2029;--ink:#e8ecf3;--muted:#9aa4b2;
  --line:#2a313d;--accent:#6f9bff;--up:#4cc98a;--down:#f07a7a;--chip:#161b23;
- --t-ph:#1d2c4d;--t-mk:#15342a;--t-cr:#402024;--t-ai:#2e2247;--t-sp:#3d2e15}}
+ --t-ph:#1d2c4d;--t-mk:#15342a;--t-cr:#402024;--t-ai:#2e2247;--t-sp:#3d2e15;
+ --warn:#2e2714;--warn-bd:#6b5518;--warn-ink:#e3c884}}
 *{{box-sizing:border-box;margin:0}}
 body{{font:15px/1.55 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
  background:var(--bg);color:var(--ink);padding:20px}}
@@ -960,7 +1276,25 @@ ul.news li:last-child{{border-bottom:none}}
 .wx .slot{{background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:8px 6px;text-align:center}}
 .wx .t{{font-size:11px;color:var(--muted);text-transform:uppercase}} .wx .e{{font-size:20px;margin:2px 0}}
 .wx .d{{font-size:14px;font-weight:700}} .wx .r{{font-size:11.5px;color:var(--muted)}}
-.golf{{font-size:12.5px;background:var(--chip);border:1px solid var(--line);border-radius:8px;padding:6px 10px}}
+.note{{background:var(--warn);border:1px solid var(--warn-bd);color:var(--warn-ink);
+ border-radius:9px;padding:9px 12px;margin-top:11px;font-size:12.5px;line-height:1.5}}
+.note ul{{margin:4px 0 0;padding-left:16px}} .note li{{margin-bottom:3px}}
+.chartblk{{margin-bottom:12px}}
+.chartblk h4{{font-size:12px;font-weight:600;color:var(--muted);margin-bottom:2px}}
+.chartblk .cap{{font-size:11px;color:var(--muted);margin-top:1px}}
+ul.news li a{{color:inherit;text-decoration:none}}
+ul.news li a:hover{{color:var(--accent);text-decoration:underline}}
+.ext{{color:var(--muted);font-size:11px;margin-left:3px}}
+.fcl{{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:10px 0 5px}}
+.fc5{{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}}
+.fc5 .d{{background:var(--chip);border:1px solid var(--line);border-radius:7px;
+ padding:4px 2px;text-align:center;line-height:1.25}}
+.fc5 .dn{{font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;
+ letter-spacing:.02em}}
+.fc5 .de{{font-size:12px;margin-right:2px}}
+.fc5 .dt{{font-size:10.5px;font-weight:700;white-space:nowrap}}
+.fc5 .dr{{font-size:8.5px;color:var(--muted);white-space:nowrap}}
+@media (max-width:480px){{.fc5 .mm{{display:none}}}}
 footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
 .gauge svg{{max-width:100%;height:auto}}
 @media (max-width:480px){{
@@ -986,17 +1320,31 @@ footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
  <button id="themeBtn" onclick="tt()">\U0001F319 Dark</button>
 </header>
 
-<div class="grid g3">
+<div class="grid g2">
  <div class="card"><h2>{w['emoji'] if w else ''} Weather — {CITY['name']}</h2>
-  {wx}
-  <div class="golf">⛳ <b>Golf outlook:</b> {esc(d['golf'])}</div></div>
+  {wx}{wx_note}</div>
  <div class="card"><h2>\U0001F4C5 {edition_label}</h2>
   {cal_html}</div>
- <div class="card"><h2>\U0001F4CA Snapshot</h2>
-  <div class="idx">{chip('S&P 500','spx')}{chip('Nasdaq','ndq')}{chip('VIX','vix')}</div></div>
 </div>
 
+<div class="card" style="margin-bottom:14px"><h2>\U0001F4F0 News You Follow</h2>
+ <ul class="news">{news_items}</ul>
+ <div class="muted" style="margin-top:8px">Headlines open a Google search in a new tab.
+ Refreshed at each build — 6 AM and 6 PM PHT.</div></div>
+
 <div class="grid g2">
+ <div class="card"><h2>\U0001F310 Global Snapshot</h2>
+  <div class="idx">{chip('S&P 500','spx')}{chip('Nasdaq','ndq')}{chip('VIX','vix')}</div>
+  <table style="margin-top:11px">
+   <tr><td>\U0001F1F5\U0001F1ED BSP policy rate</td><td class="num"><b>{RATES['bsp'][0]}</b> · {RATES['bsp'][1]}</td></tr>
+   <tr><td>\U0001F1FA\U0001F1F8 Fed funds rate</td><td class="num"><b>{RATES['fed'][0]}</b> · {RATES['fed'][1]}</td></tr>
+   <tr><td>\U0001F1EF\U0001F1F5 BoJ policy rate</td><td class="num"><b>{RATES['boj'][0]}</b> · {RATES['boj'][1]}</td></tr>
+   <tr><td>\U0001F1EA\U0001F1FA ECB deposit rate</td><td class="num"><b>{RATES['ecb'][0]}</b> · {RATES['ecb'][1]}</td></tr>
+  </table>
+  {tldr}
+  <div class="muted" style="margin-top:8px">Indices are the last published close (FRED).
+  Policy rates are maintained in the builder config.</div>
+ </div>
  <div class="card"><h2>\U0001F3AF Risk Gauges</h2>
   <div class="gwrap">
    <div class="gauge">{gauge_svg(g_eq['score'], EQ_ZONES)}
@@ -1010,15 +1358,6 @@ footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
   </div>
   <div class="muted" style="margin-top:10px">General directional reads from the gauges — not financial advice.</div>
  </div>
- <div class="card"><h2>\U0001F310 Policy & Macro</h2>
-  <table>
-   <tr><td>\U0001F1F5\U0001F1ED BSP policy rate</td><td class="num"><b>{RATES['bsp'][0]}</b> · {RATES['bsp'][1]}</td></tr>
-   <tr><td>\U0001F1FA\U0001F1F8 Fed funds rate</td><td class="num"><b>{RATES['fed'][0]}</b> · {RATES['fed'][1]}</td></tr>
-   <tr><td>\U0001F1EF\U0001F1F5 BoJ policy rate</td><td class="num"><b>{RATES['boj'][0]}</b> · {RATES['boj'][1]}</td></tr>
-   <tr><td>\U0001F1EA\U0001F1FA ECB deposit rate</td><td class="num"><b>{RATES['ecb'][0]}</b> · {RATES['ecb'][1]}</td></tr>
-  </table>
-  <div class="muted" style="margin-top:8px">Policy rates are maintained in the builder config.</div>
- </div>
 </div>
 
 <div class="grid g2">
@@ -1027,16 +1366,19 @@ footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
   {fx_rows}</table>
   <div class="muted" style="margin-top:8px">ECB reference rates via Frankfurter.</div></div>
  <div class="card"><h2>\U0001FA99 Crypto</h2>
-  <table><tr><th>Asset</th><th class="num">Price</th><th class="num">24h</th></tr>{cr_rows}</table>
-  <div class="muted" style="margin-top:8px">Coinbase spot, 24h vs same time yesterday.</div></div>
+  <table><tr><th>Asset</th><th class="num">Price</th><th class="num">24h</th>
+  <th class="num">Src</th></tr>{cr_rows}</table>
+  <div class="muted" style="margin-top:8px">Median of Coinbase, CoinGecko and Binance.
+  A source more than 25% from the median is dropped and named under Src.</div></div>
 </div>
 
 <div class="grid g2">
+ <div class="card"><h2>\U0001F1F5\U0001F1ED PH Indicators</h2>{ph_html}</div>
  <div class="card"><h2>\U0001F4C8 Portfolio</h2>{pf_html}</div>
- <div class="card"><h2>\U0001F4F0 News You Follow</h2><ul class="news">{news_items}</ul></div>
 </div>
 
-<footer>Sources: Open-Meteo, Frankfurter (ECB), Coinbase, alternative.me, Stooq, Google News.
+<footer>Sources: Open-Meteo, FRED, Frankfurter (ECB), Coinbase, CoinGecko, Binance,
+alternative.me, PSA (via ph_data.json), Google News.
 Rebuilt automatically each morning at 7:30 AM PHT by GitHub Actions.</footer>
 </div>
 <script>
@@ -1159,13 +1501,14 @@ def main():
     cryp = crypto()
     data = {
         "weather": w,
-        "golf": golf_line(w),
         "fx": fx(),
         "crypto": cryp,
         "indices": idx,
         "eq": equity_gauge(vix),
         "cr": crypto_gauge(fg),
         "news": news(),
+        "alerts": weather_alerts(w),
+        "ph": ph_indicators(),
         "calendar": calendar_events(),
         "portfolio": portfolio(cryp),
     }
