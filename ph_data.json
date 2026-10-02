@@ -1,0 +1,42 @@
+{
+  "_README": [
+    "Philippine indicators. PSA publishes no public API, so these are maintained here.",
+    "Inflation lands ~the 5th of the following month; the Labour Force Survey ~the 8th.",
+    "Add the newest month to the END of each list. The chart shows the last 9 entries,",
+    "so you can leave older ones in place - they simply scroll off.",
+    "Sources: psa.gov.ph/price-indices/cpi-ir and psa.gov.ph/statistics/labor-force-survey"
+  ],
+  "inflation": {
+    "label": "Headline inflation, % year on year",
+    "target_low": 2.0,
+    "target_high": 4.0,
+    "series": [
+      ["2025-12", 1.8],
+      ["2026-01", 2.0],
+      ["2026-02", 2.4],
+      ["2026-03", 4.1],
+      ["2026-04", 7.2],
+      ["2026-05", 6.8],
+      ["2026-06", 6.4],
+      ["2026-07", 6.2],
+      ["2026-08", 6.1]
+    ]
+  },
+  "unemployment": {
+    "label": "Unemployment rate, %",
+    "series": [
+      ["2026-04", 4.7],
+      ["2026-05", 4.8],
+      ["2026-06", 4.9],
+      ["2026-07", 6.0]
+    ]
+  },
+  "barista": {
+    "label": "Barista Index",
+    "note": "Fill in value/asof/blurb and this tile populates. Left empty it is hidden.",
+    "value": null,
+    "unit": "",
+    "asof": "",
+    "blurb": ""
+  }
+}
