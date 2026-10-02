@@ -36,6 +36,14 @@ RATES = {
     "ecb":  ("2.15%",        "on hold"),
 }
 
+# Slower-moving prints shown beside the policy rates. Edit when a new one lands.
+PRINTS = {
+    "ph_cpi":    ("PH inflation",    "6.1% (Aug)",  "Sep print lands 5 Oct"),
+    "ph_gdp":    ("PH Q2 GDP",       "2.3%",        "H1 growth 2.6%"),
+    "us_cpi":    ("US CPI (y/y)",    "3.4% (Aug)",  "unchanged on July"),
+    "us_claims": ("US jobless claims", "197k",      "week to 26 Sep"),
+}
+
 CITY = {"name": "Manila", "lat": 14.5995, "lon": 120.9842}
 
 # Gists this builder must never write to. The legacy briefing is maintained by a
@@ -189,16 +197,38 @@ def weather_alerts(w):
 
 # ----------------------------------------------------------------- markets
 def fx():
-    r = get("https://api.frankfurter.app/latest?from=PHP&to=" + ",".join(FX))
+    """PHP per unit, plus the move against the previous ECB fix.
+    Green = peso stronger (fewer pesos per unit)."""
+    frm = (NOW - dt.timedelta(days=12)).strftime("%Y-%m-%d")
+    r = get(f"https://api.frankfurter.dev/v1/{frm}..?from=PHP&to=" + ",".join(FX))
     if not r:
+        r = get("https://api.frankfurter.app/latest?from=PHP&to=" + ",".join(FX))
+        if not r:
+            return None
+        rates = r.json().get("rates", {})
+        return {k: {"php": (1 / v) * (100 if k == "JPY" else 1), "prev": None, "chg": None}
+                for k, v in rates.items() if v}
+    try:
+        series = r.json().get("rates", {})
+    except Exception:
         return None
-    rates = r.json().get("rates", {})
+    dates = sorted(series)
+    if not dates:
+        return None
+    last, prev = dates[-1], (dates[-2] if len(dates) > 1 else None)
     out = {}
-    for k, v in rates.items():
+    for k in FX:
+        v = series[last].get(k)
         if not v:
             continue
-        php = 1.0 / v
-        out[k] = php * 100 if k == "JPY" else php
+        mult = 100 if k == "JPY" else 1
+        php = (1 / v) * mult
+        pv = series.get(prev, {}).get(k) if prev else None
+        php_prev = (1 / pv) * mult if pv else None
+        out[k] = {"php": php, "prev": php_prev,
+                  "chg": ((php - php_prev) / php_prev * 100) if php_prev else None}
+    out["_asof"] = last
+    print(f"  fx: {len(out)-1} pairs, ECB fix {last}")
     return out
 
 
@@ -384,52 +414,96 @@ def _window():
     return start, start + dt.timedelta(days=days), days
 
 
-def _keep(when, allday, start, end):
-    """Enforce the window locally rather than trusting the upstream filter,
-    and on the evening edition hide events that have already finished."""
-    if when < start or when >= end:
+def _keep(when, allday, start, end, until=None):
+    """Keep anything whose RANGE overlaps the window, not just its start - a
+    multi-day hotel stay begins before today and must still show. On the evening
+    edition, hide single events that have already finished."""
+    fin = until or when
+    if fin <= start or when >= end:
         return False
-    if EDITION == "evening" and not allday and when < NOW - dt.timedelta(hours=1):
+    if EDITION == "evening" and not allday and fin < NOW - dt.timedelta(hours=1):
         return False
     return True
 
 
-def calendar_via_api():
-    """Preferred path: Google expands recurring events for us, so there is no RRULE logic here.
-    Share your calendar with the service account email, then set CALENDAR_ID."""
-    cal_id = os.environ.get("CALENDAR_ID")
-    if not cal_id:
+def _calendar_ids(tok):
+    """Every calendar the service account can see, plus any listed in CALENDAR_ID.
+    Shared and subscribed calendars only appear once they are shared with the
+    service account address - sharing your primary one is not enough."""
+    ids = [c.strip() for c in (os.environ.get("CALENDAR_ID") or "").split(",") if c.strip()]
+    r = get("https://www.googleapis.com/calendar/v3/users/me/calendarList"
+            "?minAccessRole=reader&maxResults=250",
+            headers={"Authorization": f"Bearer {tok}"})
+    if r:
+        try:
+            for c in r.json().get("items", []):
+                cid = c.get("id")
+                if cid and cid not in ids and not c.get("deleted"):
+                    ids.append(cid)
+        except Exception:
+            pass
+    return ids
+
+
+def _parse_ev(ev, cal_name):
+    def one(key):
+        v = ev.get(key, {})
+        if "dateTime" in v:
+            return dt.datetime.fromisoformat(v["dateTime"]).astimezone(PHT), False
+        if "date" in v:
+            d = dt.date.fromisoformat(v["date"])
+            return dt.datetime(d.year, d.month, d.day, tzinfo=PHT), True
+        return None, None
+    when, allday = one("start")
+    if when is None:
         return None
+    until, _ = one("end")
+    return {"when": when, "until": until, "allday": allday,
+            "today": when.date() == NOW.date(),
+            "multi": bool(until and (until.date() - when.date()).days > 1),
+            "title": str(ev.get("summary") or "(no title)"),
+            "where": str(ev.get("location") or ""),
+            "cal": cal_name}
+
+
+def calendar_via_api():
+    """Google expands recurring events server-side, so there is no RRULE logic here."""
     tok = _sa_token(["https://www.googleapis.com/auth/calendar.readonly"])
     if not tok:
         return None
-    start, end, _ = _window()
-    import urllib.parse as up
-    q = up.urlencode({"timeMin": start.isoformat(), "timeMax": end.isoformat(),
-                      "singleEvents": "true", "orderBy": "startTime", "maxResults": "50"})
-    r = get(f"https://www.googleapis.com/calendar/v3/calendars/{up.quote(cal_id)}/events?{q}",
-            headers={"Authorization": f"Bearer {tok}"})
-    if not r:
+    cal_ids = _calendar_ids(tok)
+    if not cal_ids:
         return None
-    out = []
-    for ev in r.json().get("items", []):
-        st = ev.get("start", {})
-        if "dateTime" in st:
-            when = dt.datetime.fromisoformat(st["dateTime"]).astimezone(PHT)
-            allday = False
-        elif "date" in st:
-            d = dt.date.fromisoformat(st["date"])
-            when = dt.datetime(d.year, d.month, d.day, tzinfo=PHT)
-            allday = True
-        else:
+    start, end, _ = _window()
+    # Reach back 30 days so multi-day stays that began earlier are still caught.
+    lookback = start - dt.timedelta(days=30)
+    import urllib.parse as up
+    out, seen = [], set()
+    for cid in cal_ids:
+        q = up.urlencode({"timeMin": lookback.isoformat(), "timeMax": end.isoformat(),
+                          "singleEvents": "true", "orderBy": "startTime",
+                          "maxResults": "250"})
+        r = get(f"https://www.googleapis.com/calendar/v3/calendars/{up.quote(cid)}/events?{q}",
+                headers={"Authorization": f"Bearer {tok}"})
+        if not r:
+            print(f"  ! calendar {cid[:18]}... unreadable", file=sys.stderr)
             continue
-        if not _keep(when, allday, start, end):
+        try:
+            items = r.json().get("items", [])
+        except Exception:
             continue
-        out.append({"when": when, "allday": allday, "today": when.date() == NOW.date(),
-                    "title": str(ev.get("summary") or "(no title)"),
-                    "where": str(ev.get("location") or "")})
-    out.sort(key=lambda e: (e["when"], e["title"]))
-    print(f"  calendar (api): {len(out)} event(s)")
+        nm = cid.split("@")[0][:18]
+        for ev in items:
+            e = _parse_ev(ev, nm)
+            if not e or not _keep(e["when"], e["allday"], start, end, e["until"]):
+                continue
+            key = (e["title"], e["when"].isoformat())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(e)
+    out.sort(key=lambda e: (not e["multi"], e["when"], e["title"]))
+    print(f"  calendar (api): {len(out)} event(s) across {len(cal_ids)} calendar(s)")
     return out
 
 
@@ -467,9 +541,10 @@ def calendar_via_ics():
             when = v.astimezone(PHT) if v.tzinfo else v.replace(tzinfo=PHT)
         if not _keep(when, allday, start, end):
             continue
-        out.append({"when": when, "allday": allday, "today": when.date() == NOW.date(),
+        out.append({"when": when, "until": None, "allday": allday, "multi": False,
+                    "today": when.date() == NOW.date(),
                     "title": str(ev.get("SUMMARY") or "(no title)"),
-                    "where": str(ev.get("LOCATION") or "")})
+                    "where": str(ev.get("LOCATION") or ""), "cal": ""})
     out.sort(key=lambda e: (e["when"], e["title"]))
     print(f"  calendar (ics): {len(out)} event(s)")
     return out
@@ -699,9 +774,58 @@ def ph_indicators():
     for k in ("inflation", "unemployment"):
         if isinstance(d.get(k), dict):
             d[k]["series"] = (d[k].get("series") or [])[-9:]     # cap at 9 months
+    b = d.get("barista") or {}
+    try:
+        hourly = b["wage_daily_php"] / b["hours_per_day"]
+        d["barista"]["minutes"] = b["cappuccino_php"] / hourly * 60
+        d["barista"]["hourly"] = hourly
+    except Exception:
+        d.setdefault("barista", {})["minutes"] = None
+    ps = d.get("psei") or {}
+    if ps.get("close") and ps.get("prev"):
+        ps["pct"] = (ps["close"] - ps["prev"]) / ps["prev"] * 100
     print(f"  ph indicators: {len(d.get('inflation', {}).get('series', []))} inflation, "
-          f"{len(d.get('unemployment', {}).get('series', []))} unemployment")
+          f"{len(d.get('unemployment', {}).get('series', []))} unemployment, "
+          f"psei {ps.get('close')}, barista "
+          f"{(d.get('barista') or {}).get('minutes') and round(d['barista']['minutes'])} min")
     return d
+
+
+STATE_FILE = "state.json"
+
+
+def load_state():
+    try:
+        return json.loads(io.open(STATE_FILE, encoding="utf-8").read())
+    except Exception:
+        return {}
+
+
+def save_state(st):
+    try:
+        io.open(STATE_FILE, "w", encoding="utf-8").write(json.dumps(st, indent=1, sort_keys=True))
+    except Exception as e:
+        print(f"  ! could not write state.json: {type(e).__name__}", file=sys.stderr)
+
+
+def snapshot_state(d):
+    """The handful of values worth diffing between editions."""
+    idx = d.get("indices") or {}
+    ph = d.get("ph") or {}
+    btc = next((c for c in (d.get("crypto") or []) if c["sym"] == "BTC"), None)
+    return {
+        "spx": (idx.get("spx") or {}).get("close"),
+        "ndq": (idx.get("ndq") or {}).get("close"),
+        "vix": (idx.get("vix") or {}).get("close"),
+        "psei": (ph.get("psei") or {}).get("close"),
+        "fng": (d.get("fg") or {}).get("value"),
+        "btc": btc["price"] if btc else None,
+        "usdphp": ((d.get("fx") or {}).get("USD") or {}).get("php"),
+        "rates": {k: v[0] for k, v in RATES.items()},
+        "ph_cpi": PRINTS["ph_cpi"][1],
+        "edition": EDITION,
+        "built": NOW.isoformat(),
+    }
 
 
 # -------------------------------------------------------------------- news
@@ -745,10 +869,14 @@ def gauge_svg(score, zones):
         frm = to
     ang = -90 + score / 100 * 180
     return (f'<svg width="180" height="100" viewBox="0 0 180 100">{segs}'
+            f'<text x="{cx}" y="{cy-16}" text-anchor="middle" font-size="27" '
+            f'font-weight="700" fill="var(--ink)">{score:.0f}</text>'
+            f'<text x="{cx}" y="{cy-4}" text-anchor="middle" font-size="9" '
+            f'fill="var(--muted)">/ 100</text>'
             f'<g transform="rotate({ang:.1f} {cx} {cy})">'
-            f'<line x1="{cx}" y1="{cy}" x2="{cx}" y2="{cy-r+20}" stroke="var(--ink)" '
-            f'stroke-width="3.5" stroke-linecap="round"/></g>'
-            f'<circle cx="{cx}" cy="{cy}" r="5" fill="var(--ink)"/></svg>')
+            f'<line x1="{cx}" y1="{cy}" x2="{cx}" y2="{cy-r+26}" stroke="var(--ink)" '
+            f'stroke-width="3" stroke-linecap="round"/></g>'
+            f'<circle cx="{cx}" cy="{cy}" r="4" fill="var(--ink)"/></svg>')
 
 
 EQ_ZONES = [(33, "#3fb46e"), (66, "#f0b429"), (100, "#d13b3b")]
@@ -1040,26 +1168,53 @@ def build_html(d):
               f' · Humidity {w["humidity"]}%</div>'
               f'<div class="wx">{wx_slot("Morning", w["morning"])}'
               f'{wx_slot("Afternoon", w["afternoon"])}{wx_slot("Evening", w["evening"])}</div>')
-        if w.get("days"):
-            wx += ('<div class="fcl">Next 5 days</div><div class="fc5">'
-                   + "".join(day_cell(x) for x in w["days"]) + "</div>")
+    wx_more = ""
+    if w and w.get("days"):
+        wx_more = ('<div class="fc5">' + "".join(day_cell(x) for x in w["days"])
+                   + "</div>")
     else:
         wx = '<div class="muted">Weather unavailable.</div>'
 
-    fx_rows = ""
     fxd = d["fx"] or {}
-    order = [("USD", "USD/PHP"), ("EUR", "EUR/PHP"), ("GBP", "GBP/PHP"), ("JPY", "JPY/PHP ×100"),
-             ("SGD", "SGD/PHP"), ("AUD", "AUD/PHP"), ("CNY", "CNY/PHP"), ("HKD", "HKD/PHP")]
-    pairs = [(k, lbl, fxd.get(k)) for k, lbl in order]
-    for i in range(0, len(pairs), 2):
-        k1, l1, v1 = pairs[i]
-        k2, l2, v2 = pairs[i + 1] if i + 1 < len(pairs) else ("", "", None)
-        f1 = f"{v1:,.2f}" if v1 else "—"
-        f2 = f"{v2:,.2f}" if v2 else "—"
-        bold = ' style="font-weight:700"' if l1 == "USD/PHP" else ""
-        c2 = f'<td class="num" data-fx="{k2}">{f2}</td>' if k2 else "<td></td>"
-        fx_rows += (f'<tr><td>{l1}</td><td class="num" data-fx="{k1}"{bold}>{f1}</td>'
-                    f'<td>{l2}</td>{c2}</tr>')
+
+    def fx_move(e):
+        if not e or e.get("chg") is None:
+            return '<span class="muted">—</span>'
+        ch = e["chg"]
+        cls, arrow = ("up", "\u25bc") if ch < 0 else ("down", "\u25b2")
+        return f'<span class="{cls}">{arrow} {abs(ch):.2f}%</span>'
+
+    usd = fxd.get("USD")
+    fx_main = (f'<div class="fxbig"><div><div class="muted">USD / PHP</div>'
+               f'<div class="v">{usd["php"]:,.2f}</div></div>'
+               f'<div style="text-align:right">{fx_move(usd)}'
+               f'<div class="muted">vs previous fix</div></div></div>'
+               if usd else '<div class="muted">USD rate unavailable.</div>')
+
+    fx_rest = ""
+    for _k, _lbl in [("EUR", "EUR"), ("GBP", "GBP"), ("JPY", "JPY (100)"), ("SGD", "SGD"),
+                     ("AUD", "AUD"), ("CNY", "CNY"), ("HKD", "HKD")]:
+        _e = fxd.get(_k)
+        if not _e:
+            continue
+        fx_rest += (f'<div class="fxrow"><span class="pair">{_lbl} / PHP</span>'
+                    f'<span><span class="val">{_e["php"]:,.2f}</span> &nbsp;{fx_move(_e)}'
+                    f'</span></div>')
+    fx_asof = fxd.get("_asof", "")
+
+    def abs_cell(c):
+        """24h move in dollars, from the median price and median percent."""
+        if not c or c.get("price") is None or c.get("chg") is None:
+            return '<span class="muted">—</span>'
+        prev = c["price"] / (1 + c["chg"] / 100) if (1 + c["chg"] / 100) else None
+        if not prev:
+            return '<span class="muted">—</span>'
+        delta = c["price"] - prev
+        cls = "up" if delta >= 0 else "down"
+        sign = "+" if delta >= 0 else "\u2212"
+        a = abs(delta)
+        txt = f"{a:,.2f}" if a >= 0.01 else f"{a:.8f}".rstrip("0")
+        return f'<span class="{cls}">{sign}${txt}</span>'
 
     def src_cell(c):
         if not c or not c.get("total"):
@@ -1071,6 +1226,7 @@ def build_html(d):
     cr_rows = "".join(
         f'<tr data-coin="{sym}"><td><b>{sym}</b> {esc(name)}</td>'
         f'<td class="num" data-live="price">{money(have[sym]["price"]) if sym in have else "—"}</td>'
+        f'<td class="num" data-live="abs">{abs_cell(have.get(sym))}</td>'
         f'<td class="num" data-live="chg">{pct_html(have[sym]["chg"]) if sym in have else "—"}</td>'
         f'<td class="num" data-live="src" style="color:var(--muted);font-size:11.5px">'
         f'{src_cell(have.get(sym))}</td></tr>'
@@ -1078,6 +1234,13 @@ def build_html(d):
     )
 
     idx = d["indices"] or {}
+
+    _ps = ((d.get("ph") or {}).get("psei") or {})
+    psei_chip = (f'<div class="chip"><div class="n">PSEi</div>'
+                 f'<div class="v">{_ps["close"]:,.2f}</div>'
+                 f'<div class="c">{pct_html(_ps.get("pct"))}</div></div>'
+                 if _ps.get("close") else
+                 '<div class="chip"><div class="n">PSEi</div><div class="v">\u2014</div></div>')
 
     def chip(name, key, fmt="{:,.2f}"):
         v = idx.get(key)
@@ -1089,12 +1252,12 @@ def build_html(d):
 
     import urllib.parse as _up
     news_items = "".join(
-        f'<li><span class="tag t-{n["cls"]}">{esc(n["tag"])}</span>'
+        f'<div class="newsitem"><span class="tag t-{n["cls"]}">{esc(n["tag"])}</span>'
         f'<a href="https://www.google.com/search?q={_up.quote_plus(n["title"])}" '
         f'target="_blank" rel="noopener noreferrer">{esc(n["title"])}'
-        f'<span class="ext">\u2197</span></a></li>'
+        f'<span class="ext">\u2197</span></a></div>'
         for n in (d["news"] or [])
-    ) or '<li class="muted">No headlines retrieved.</li>'
+    ) or '<div class="muted">No headlines retrieved.</div>'
 
     edition_label = "Schedule" if EDITION == "evening" else "Today"
 
@@ -1165,27 +1328,61 @@ def build_html(d):
                      'open; ETF prices refresh at each build. Last column is day change; the '
                      'total row shows P&amp;L where cost basis is present.</div>')
 
-    # Global Snapshot TLDR - only facts that changed, never static explanation.
-    tl = []
-    for key, nm in (("spx", "S&P 500"), ("ndq", "Nasdaq")):
-        v = (d.get("indices") or {}).get(key)
-        if v and v.get("pct") is not None:
-            tl.append(f'{nm} {"rose" if v["pct"] >= 0 else "fell"} '
-                      f'{abs(v["pct"]):.2f}% to {v["close"]:,.0f}.')
-    vx = (d.get("indices") or {}).get("vix")
-    if vx:
-        lvl = "calm" if vx["close"] < 16 else ("unsettled" if vx["close"] < 25 else "stressed")
-        tl.append(f'VIX at {vx["close"]:.2f} \u2014 volatility {lvl}.')
-    if d.get("cr") and "UNKNOWN" not in d["cr"]["label"]:
-        tl.append(d["cr"]["label"].replace("Crypto: ", "Crypto sentiment ").capitalize() + ".")
-    tl.append(f'Policy: BSP {RATES["bsp"][0]} ({RATES["bsp"][1]}), Fed {RATES["fed"][0]}, '
-              f'BoJ {RATES["boj"][0]}, ECB {RATES["ecb"][0]}.')
-    tldr = '<div class="note"><b>TL;DR</b><ul>' + "".join(f"<li>{x}</li>" for x in tl) + "</ul></div>"
+    # "What changed" - diffed against the previous edition's state.json.
+    prev = d.get("prev_state") or {}
+    idx = d.get("indices") or {}
+    phd = d.get("ph") or {}
+    chg = []
 
-    # Weather alert note
+    def moved(key, now, name="", pct=None):
+        was = prev.get(key)
+        if now is None:
+            return
+        if was is None:
+            chg.append(f'{name} {now:,.2f}' + (f' ({pct:+.2f}%)' if pct is not None else "") + ".")
+        elif abs(now - was) > 1e-9:
+            dd = now - was
+            sign = "+" if dd >= 0 else "\u2212"
+            chg.append(f'{name} {now:,.2f} from {was:,.2f} ({sign}{abs(dd):,.2f}).')
+
+    moved("spx", (idx.get("spx") or {}).get("close"), "S&P 500", (idx.get("spx") or {}).get("pct"))
+    moved("ndq", (idx.get("ndq") or {}).get("close"), "Nasdaq", (idx.get("ndq") or {}).get("pct"))
+    ps = phd.get("psei") or {}
+    moved("psei", ps.get("close"), "PSEi", ps.get("pct"))
+    moved("vix", (idx.get("vix") or {}).get("close"), "VIX")
+    moved("usdphp", ((d.get("fx") or {}).get("USD") or {}).get("php"), "USD/PHP")
+
+    for k, v in {k: v[0] for k, v in RATES.items()}.items():
+        was = (prev.get("rates") or {}).get(k)
+        if was not in (None, v):
+            chg.append(f'{k.upper()} policy rate now {v}, was {was}.')
+    if prev.get("ph_cpi") not in (None, PRINTS["ph_cpi"][1]):
+        chg.append(f'PH inflation print updated to {PRINTS["ph_cpi"][1]}.')
+
+    vx = (idx.get("vix") or {}).get("close")
+    pcts = [v.get("pct") for v in (idx.get("spx"), idx.get("ndq"), ps) if v and v.get("pct")]
+    tone = ("risk-on" if pcts and sum(pcts) / len(pcts) > 0.25 else
+            "risk-off" if pcts and sum(pcts) / len(pcts) < -0.25 else "mixed")
+    vol = "calm" if (vx or 0) < 16 else ("unsettled" if (vx or 0) < 25 else "stressed")
+    fgv = (d.get("fg") or {}).get("value")
+    ct = ""
+    if fgv is not None:
+        word = "greedy" if fgv > 55 else ("fearful" if fgv < 45 else "neutral")
+        ct = f', crypto sentiment {word} at {fgv}'
+    sentiment = f'<b>Overall:</b> equities {tone}, volatility {vol}{ct}.'
+
+    if not chg:
+        chg = ["Nothing material moved since the previous edition."]
+    tldr = ('<div class="note"><b>What changed</b><ul>'
+            + "".join(f"<li>{x}</li>" for x in chg)
+            + f'</ul><div style="margin-top:6px">{sentiment}</div></div>')
+
+    # Weather alerts + the 5-day strip live together behind one collapsible.
     al = d.get("alerts") or []
-    wx_note = ('<div class="note"><b>Outlook</b><ul>'
+    _alerts = ('<div class="note"><b>Outlook</b><ul>'
                + "".join(f"<li>{esc(x)}</li>" for x in al) + "</ul></div>") if al else ""
+    wx_note = ('<details class="coll"><summary>Next 5 days &amp; outlook</summary>'
+               + wx_more + _alerts + "</details>") if (wx_more or _alerts) else ""
 
     # PH indicators
     ph = d.get("ph")
@@ -1207,15 +1404,42 @@ def build_html(d):
                         + "</h4>" + line_svg([(mon(k), v) for k, v in un["series"]])
                         + '<div class="cap">PSA Labour Force Survey.</div></div>')
         ba = ph.get("barista") or {}
-        if ba.get("value") is not None:
-            ph_html += ('<div class="chartblk"><h4>' + esc(ba.get("label", "Barista Index"))
-                        + f'</h4><div class="big">{esc(str(ba["value"]))}'
-                        + esc(ba.get("unit", "")) + "</div>"
-                        + f'<div class="cap">{esc(ba.get("blurb", ""))}'
-                        + (f' · as of {esc(ba["asof"])}' if ba.get("asof") else "")
-                        + "</div></div>")
+        if ba.get("minutes"):
+            mins = ba["minutes"]
+            hh, mm = int(mins // 60), int(round(mins % 60))
+            ph_html += ('<div class="chartblk"><h4>\u2615 Barista Index</h4>'
+                        f'<div class="fxbig"><div><div class="v">{mins:,.0f}'
+                        '<span style="font-size:15px;font-weight:600"> min</span></div>'
+                        f'<div class="muted">{hh}h {mm:02d}m of work</div></div></div>'
+                        '<div class="cap">Minutes a barista on the NCR minimum wage must work '
+                        'to afford the cappuccino they just made \u2014 '
+                        f'\u20b1{ba["cappuccino_php"]:,.0f} against \u20b1{ba["hourly"]:,.2f} '
+                        f'an hour.<br>{esc(ba.get("wage_note", ""))}; '
+                        f'{esc(ba.get("price_note", ""))}.</div></div>')
         if not ph_html:
             ph_html = '<div class="muted">No Philippine series populated yet.</div>'
+
+    cl = []
+    rows_ok = [c for c in (d["crypto"] or []) if c.get("price") is not None
+               and c.get("chg") is not None]
+    if rows_ok:
+        best = max(rows_ok, key=lambda c: c["chg"])
+        worst = min(rows_ok, key=lambda c: c["chg"])
+        ups = [c for c in rows_ok if c["chg"] > 0]
+        btc = next((c for c in rows_ok if c["sym"] == "BTC"), None)
+        if btc:
+            cl.append(f'<b>BTC {money(btc["price"])}</b>, '
+                      f'{"up" if btc["chg"] >= 0 else "down"} {abs(btc["chg"]):.2f}% on the day.')
+        cl.append(f'Breadth {len(ups)} of {len(rows_ok)} higher · best {best["sym"]} '
+                  f'{best["chg"]:+.2f}%, worst {worst["sym"]} {worst["chg"]:+.2f}%.')
+        drop = [c["sym"] for c in (d["crypto"] or []) if c.get("dropped")]
+        if drop:
+            cl.append(f'{", ".join(drop)} priced on two sources — the third diverged by '
+                      f'more than 25% and was discarded.')
+    if d.get("cr") and "UNKNOWN" not in d["cr"]["label"]:
+        cl.append(d["cr"]["label"].replace("Crypto: ", "Fear &amp; Greed ") + ".")
+    cr_note = ('<div class="note"><b>What moved</b><ul>'
+               + "".join(f"<li>{x}</li>" for x in cl) + "</ul></div>") if cl else ""
 
     eq_bul = "".join(f"<li>{b}</li>" for b in g_eq["bullets"])
     cr_bul = "".join(f"<li>{b}</li>" for b in g_cr["bullets"])
@@ -1287,14 +1511,31 @@ ul.news li a:hover{{color:var(--accent);text-decoration:underline}}
 .ext{{color:var(--muted);font-size:11px;margin-left:3px}}
 .fcl{{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:10px 0 5px}}
 .fc5{{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}}
-.fc5 .d{{background:var(--chip);border:1px solid var(--line);border-radius:7px;
- padding:4px 2px;text-align:center;line-height:1.25}}
-.fc5 .dn{{font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;
- letter-spacing:.02em}}
-.fc5 .de{{font-size:12px;margin-right:2px}}
-.fc5 .dt{{font-size:10.5px;font-weight:700;white-space:nowrap}}
-.fc5 .dr{{font-size:8.5px;color:var(--muted);white-space:nowrap}}
+.fc5 .d{{background:var(--chip);border:1px solid var(--line);border-radius:8px;
+ padding:7px 2px;text-align:center;line-height:1.3}}
+.fc5 .dn{{font-size:9.5px;font-weight:700;color:var(--muted);text-transform:uppercase}}
+.fc5 .de{{font-size:17px;display:block;margin:2px 0}}
+.fc5 .dt{{font-size:11.5px;font-weight:700;white-space:nowrap}}
+.fc5 .dr{{font-size:9px;color:var(--muted);white-space:nowrap}}
 @media (max-width:480px){{.fc5 .mm{{display:none}}}}
+details.coll{{margin-top:11px;border-top:1px solid var(--line);padding-top:9px}}
+details.coll>summary{{cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);
+ list-style:none;display:flex;justify-content:space-between;align-items:center}}
+details.coll>summary::-webkit-details-marker{{display:none}}
+details.coll>summary::after{{content:"\25BE";transition:transform .15s}}
+details.coll[open]>summary::after{{transform:rotate(180deg)}}
+.newsgrid{{display:grid;gap:0}}
+.newsitem{{padding:8px 0;border-bottom:1px solid var(--line);font-size:13.5px;line-height:1.45}}
+.newsitem:last-child{{border-bottom:none}}
+.newsitem a{{color:inherit;text-decoration:none;font-weight:600}}
+.newsitem a:hover{{color:var(--accent);text-decoration:underline}}
+.fxrow{{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+ padding:7px 0;border-bottom:1px solid var(--line);font-size:13.5px}}
+.fxrow:last-child{{border-bottom:none}}
+.fxrow .pair{{color:var(--muted)}}
+.fxrow .val{{font-variant-numeric:tabular-nums;font-weight:600}}
+.fxbig{{display:flex;justify-content:space-between;align-items:baseline;gap:10px}}
+.fxbig .v{{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums}}
 footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
 .gauge svg{{max-width:100%;height:auto}}
 @media (max-width:480px){{
@@ -1328,18 +1569,22 @@ footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
 </div>
 
 <div class="card" style="margin-bottom:14px"><h2>\U0001F4F0 News You Follow</h2>
- <ul class="news">{news_items}</ul>
+ <div class="newsgrid">{news_items}</div>
  <div class="muted" style="margin-top:8px">Headlines open a Google search in a new tab.
  Refreshed at each build — 6 AM and 6 PM PHT.</div></div>
 
 <div class="grid g2">
  <div class="card"><h2>\U0001F310 Global Snapshot</h2>
-  <div class="idx">{chip('S&P 500','spx')}{chip('Nasdaq','ndq')}{chip('VIX','vix')}</div>
+  <div class="idx">{chip('S&P 500','spx')}{chip('Nasdaq','ndq')}{psei_chip}{chip('VIX','vix')}</div>
   <table style="margin-top:11px">
    <tr><td>\U0001F1F5\U0001F1ED BSP policy rate</td><td class="num"><b>{RATES['bsp'][0]}</b> · {RATES['bsp'][1]}</td></tr>
    <tr><td>\U0001F1FA\U0001F1F8 Fed funds rate</td><td class="num"><b>{RATES['fed'][0]}</b> · {RATES['fed'][1]}</td></tr>
    <tr><td>\U0001F1EF\U0001F1F5 BoJ policy rate</td><td class="num"><b>{RATES['boj'][0]}</b> · {RATES['boj'][1]}</td></tr>
    <tr><td>\U0001F1EA\U0001F1FA ECB deposit rate</td><td class="num"><b>{RATES['ecb'][0]}</b> · {RATES['ecb'][1]}</td></tr>
+   <tr><td>\U0001F1F5\U0001F1ED {PRINTS['ph_cpi'][0]}</td><td class="num"><b>{PRINTS['ph_cpi'][1]}</b> · {PRINTS['ph_cpi'][2]}</td></tr>
+   <tr><td>\U0001F1F5\U0001F1ED {PRINTS['ph_gdp'][0]}</td><td class="num"><b>{PRINTS['ph_gdp'][1]}</b> · {PRINTS['ph_gdp'][2]}</td></tr>
+   <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_cpi'][0]}</td><td class="num"><b>{PRINTS['us_cpi'][1]}</b> · {PRINTS['us_cpi'][2]}</td></tr>
+   <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_claims'][0]}</td><td class="num"><b>{PRINTS['us_claims'][1]}</b> · {PRINTS['us_claims'][2]}</td></tr>
   </table>
   {tldr}
   <div class="muted" style="margin-top:8px">Indices are the last published close (FRED).
@@ -1362,12 +1607,14 @@ footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
 
 <div class="grid g2">
  <div class="card"><h2>\U0001F4B1 FX — Philippine Peso</h2>
-  <table><tr><th>Pair</th><th class="num">Rate (₱)</th><th>Pair</th><th class="num">Rate (₱)</th></tr>
-  {fx_rows}</table>
-  <div class="muted" style="margin-top:8px">ECB reference rates via Frankfurter.</div></div>
+  {fx_main}
+  <details class="coll"><summary>Other currencies</summary>{fx_rest}</details>
+  <div class="muted" style="margin-top:8px">ECB reference fix {fx_asof}.
+  Green ▼ means the peso strengthened.</div></div>
  <div class="card"><h2>\U0001FA99 Crypto</h2>
-  <table><tr><th>Asset</th><th class="num">Price</th><th class="num">24h</th>
-  <th class="num">Src</th></tr>{cr_rows}</table>
+  <table><tr><th>Coin</th><th class="num">USD (median)</th><th class="num">24h $</th>
+  <th class="num">24h %</th><th class="num">Src</th></tr>{cr_rows}</table>
+  {cr_note}
   <div class="muted" style="margin-top:8px">Median of Coinbase, CoinGecko and Binance.
   A source more than 25% from the median is dropped and named under Src.</div></div>
 </div>
@@ -1507,6 +1754,8 @@ def main():
         "eq": equity_gauge(vix),
         "cr": crypto_gauge(fg),
         "news": news(),
+        "fg": fg,
+        "prev_state": load_state(),
         "alerts": weather_alerts(w),
         "ph": ph_indicators(),
         "calendar": calendar_events(),
@@ -1519,6 +1768,7 @@ def main():
     if not got:
         sys.exit("Every source failed - refusing to overwrite the gist with an empty briefing.")
 
+    save_state(snapshot_state(data))
     page = build_html(data)
     print(f"  html {len(page):,} bytes")
 
