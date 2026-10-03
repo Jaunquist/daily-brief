@@ -1,7 +1,7 @@
 /* Daily Brief service worker.
    Shell is precached. The encrypted payload is cached as ciphertext so offline
    opens still require the passcode or the stored device key. */
-const VERSION = 'daily-brief-v1';
+const VERSION = 'daily-brief-v2';
 const SHELL = VERSION + '-shell';
 const DATA  = VERSION + '-data';
 
@@ -70,10 +70,25 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Shell: cache first, refresh in the background.
   if (url.origin === self.location.origin) {
+    // index.html is network-first so a redeployed shell shows up immediately.
+    // Icons and the manifest stay cache-first - they essentially never change.
+    const isDoc = req.mode === 'navigate' ||
+                  url.pathname.endsWith('/') ||
+                  url.pathname.endsWith('/index.html');
     e.respondWith((async () => {
       const cache = await caches.open(SHELL);
+      if (isDoc) {
+        try {
+          const fresh = await fetch(req, { cache: 'no-store' });
+          if (fresh && fresh.ok) {
+            cache.put(req, fresh.clone()).catch(() => {});
+            return fresh;
+          }
+        } catch (err) { /* offline - fall through to cache */ }
+        return (await cache.match(req, { ignoreSearch: true }))
+            || new Response('Offline', { status: 503 });
+      }
       const hit = await cache.match(req, { ignoreSearch: true });
       const net = fetch(req).then((r) => {
         if (r && r.ok) cache.put(req, r.clone()).catch(() => {});
