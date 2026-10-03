@@ -1179,7 +1179,7 @@ function badge(t){var e=document.getElementById('liveBadge'); if(e) e.textConten
 /* ---------- splash ---------- */
 var STEPS=[['cb','Coinbase'],['cg','CoinGecko'],['bn','Binance'],
            ['fx','ECB via Frankfurter'],['fng','Fear & Greed']];
-var timers={}, splashEl=null, settled=0;
+var timers={}, splashEl=null, settled=0, troubles=0;
 
 function buildSplash(){
   var h='<div class="sp-card" role="status" aria-live="polite">'+
@@ -1198,7 +1198,7 @@ function buildSplash(){
   return el;
 }
 function openSplash(){
-  settled=0;
+  settled=0; troubles=0;
   if(!splashEl) splashEl=buildSplash();
   STEPS.forEach(function(s){ setStep(s[0],'wait','waiting'); });
   var f=document.getElementById('sp-fill'); if(f) f.style.width='0%';
@@ -1222,7 +1222,16 @@ function bumpBar(){
   settled++;
   var f=document.getElementById('sp-fill');
   if(f) f.style.width=Math.round(settled/STEPS.length*100)+'%';
-  if(settled>=STEPS.length) setTimeout(closeSplash,700);
+  if(settled < STEPS.length) return;
+  // Clean run: get out of the way. Anything warned or failed: stay put, because
+  // seeing which source broke is the whole point of this overlay.
+  if(troubles===0){
+    setTimeout(closeSplash,1100);
+  }else{
+    var foot=document.querySelector('.sp-foot');
+    if(foot) foot.innerHTML='<b>'+troubles+' source'+(troubles===1?'':'s')+
+      ' did not return data.</b><br>Click outside or press Esc to dismiss';
+  }
 }
 
 /* Runs fn, timing it and reporting ok / warn / fail to the splash.
@@ -1241,6 +1250,7 @@ async function track(id,fn){
     else   { msg=n+' value'+(n===1?'':'s'); }
   }catch(e){ state='fail'; msg='failed'; }
   clearInterval(timers[id]); delete timers[id];
+  if(state!=='ok') troubles++;
   setStep(id,state,msg+' \\u00b7 '+((Date.now()-t0)/1000).toFixed(1)+'s');
   bumpBar();
   if(state==='ok') ok++;
@@ -1412,6 +1422,9 @@ async function refresh(){
   if(busy) return;
   busy=true; ok=0;
   openSplash();
+  // Ask the shell to re-check the gist too, so a new edition is picked up
+  // rather than only the live prices being refreshed.
+  try{ parent.postMessage({dailyBriefCheck:1},'*'); }catch(e){}
   badge('refreshing\\u2026');
   try{
     var res=await Promise.all([track('cb',cbAll),track('cg',cgAll),track('bn',bnAll),
