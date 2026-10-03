@@ -385,30 +385,134 @@ def fred_series(series_id, days=40):
             "asof": pts[-1][0]}
 
 
-def indices(prev_state=None):
-    """S&P 500, Nasdaq and VIX. FRED times out from runners often enough that the
-    last good values are cached in state.json and reused, clearly marked stale."""
+IDX_SYMS = {
+    "spx": {"stooq": "^spx", "yahoo": "^GSPC", "fred": "SP500",      "name": "S&P 500"},
+    "ndq": {"stooq": "^ndq", "yahoo": "^IXIC", "fred": "NASDAQCOM",  "name": "Nasdaq"},
+    "vix": {"stooq": "^vix", "yahoo": "^VIX",  "fred": "VIXCLS",     "name": "VIX"},
+}
+
+
+def idx_stooq():
+    """No key, but Stooq throttles datacenter IPs, so this often returns nothing."""
+    q = "+".join(v["stooq"] for v in IDX_SYMS.values())
+    r = get(f"https://stooq.com/q/l/?s={q}&f=sd2t2ohlcv&h&e=csv", timeout=20)
     out = {}
-    for key, sid in (("spx", "SP500"), ("ndq", "NASDAQCOM"), ("vix", "VIXCLS")):
-        v = fred_series(sid)
-        if v:
-            out[key] = v
+    if not r:
+        return out
+    rev = {v["stooq"].lower(): k for k, v in IDX_SYMS.items()}
+    for line in r.text.strip().splitlines()[1:]:
+        p_ = line.split(",")
+        if len(p_) < 8:
+            continue
+        key = rev.get(p_[0].lower())
+        if not key:
+            continue
+        try:
+            close, openp, day = float(p_[6]), float(p_[3]), p_[1]
+        except ValueError:
+            continue
+        out[key] = {"close": close, "asof": day,
+                    "pct": ((close - openp) / openp * 100) if openp else None}
+    return out
+
+
+def idx_yahoo():
+    """No key. The chart endpoint carries the previous close, so the day move is exact."""
+    out = {}
+    for key, v in IDX_SYMS.items():
+        r = get("https://query1.finance.yahoo.com/v8/finance/chart/"
+                f"{v['yahoo']}?range=5d&interval=1d", timeout=20)
+        if not r:
+            continue
+        try:
+            meta = r.json()["chart"]["result"][0]["meta"]
+            close = meta.get("regularMarketPrice")
+            prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+            if close is None:
+                continue
+            ts = meta.get("regularMarketTime")
+            out[key] = {
+                "close": float(close),
+                "pct": ((close - prev) / prev * 100) if prev else None,
+                "asof": (dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%d")
+                         if ts else ""),
+            }
+        except Exception:
+            continue
+    return out
+
+
+def idx_fred_api():
+    """The real FRED API. Needs a free key from
+    fred.stlouisfed.org/docs/api/api_key.html - far faster than fredgraph.csv."""
+    key = os.environ.get("FRED_API_KEY")
+    if not key:
+        return {}
+    out = {}
+    start_d = (NOW - dt.timedelta(days=40)).strftime("%Y-%m-%d")
+    for k, v in IDX_SYMS.items():
+        r = get("https://api.stlouisfed.org/fred/series/observations"
+                f"?series_id={v['fred']}&api_key={key}&file_type=json"
+                f"&observation_start={start_d}&sort_order=desc&limit=5", timeout=25)
+        if not r:
+            continue
+        try:
+            obs = [o for o in r.json().get("observations", []) if o.get("value") != "."]
+            if not obs:
+                continue
+            last = float(obs[0]["value"])
+            prev = float(obs[1]["value"]) if len(obs) > 1 else None
+            out[k] = {"close": last, "asof": obs[0]["date"],
+                      "pct": ((last - prev) / prev * 100) if prev else None}
+        except Exception:
+            continue
+    return out
+
+
+def idx_fred_csv():
+    """Chart-download endpoint. Slow and timeout-prone from runners; last resort."""
+    out = {}
+    for k, v in IDX_SYMS.items():
+        got = fred_series(v["fred"])
+        if got:
+            out[k] = got
+    return out
+
+
+def indices(prev_state=None):
+    """Try each provider in turn, filling only what is still missing, then fall back
+    to the previous run's cache. Logs which provider answered for each index."""
+    out, origin = {}, {}
+    for label, fn in (("stooq", idx_stooq), ("yahoo", idx_yahoo),
+                      ("fred-api", idx_fred_api), ("fred-csv", idx_fred_csv)):
+        missing = [k for k in IDX_SYMS if k not in out]
+        if not missing:
+            break
+        try:
+            got = fn() or {}
+        except Exception as e:
+            print(f"  . {label} errored ({type(e).__name__})", file=sys.stderr)
+            continue
+        for k in missing:
+            if got.get(k, {}).get("close"):
+                out[k] = got[k]
+                origin[k] = label
+        if got:
+            print(f"  . {label}: {len([k for k in missing if k in got])} of {len(missing)}")
+
     cache = (prev_state or {}).get("idx_cache") or {}
-    for key in ("spx", "ndq", "vix"):
-        if key not in out and cache.get(key, {}).get("close"):
-            c = dict(cache[key])
+    for k in IDX_SYMS:
+        if k not in out and cache.get(k, {}).get("close"):
+            c = dict(cache[k])
             c["stale"] = True
-            out[key] = c
-    live = [k for k, v in out.items() if not v.get("stale")]
-    stale = [k for k, v in out.items() if v.get("stale")]
-    if live:
-        print("  indices (FRED): " + ", ".join(
-            f"{k}={out[k]['close']:,.2f} ({out[k].get('asof','')})" for k in live))
-    if stale:
-        print(f"  indices reused from cache (FRED unreachable): {', '.join(stale)}",
-              file=sys.stderr)
-    if not out:
-        print("  ! no index data at all", file=sys.stderr)
+            out[k] = c
+            origin[k] = "cache"
+
+    if out:
+        print("  indices: " + ", ".join(
+            f"{k}={out[k]['close']:,.2f} [{origin.get(k, '?')}]" for k in out))
+    else:
+        print("  ! no index data from any provider", file=sys.stderr)
     return out
 
 
