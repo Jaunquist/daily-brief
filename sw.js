@@ -1,7 +1,7 @@
 /* Daily Brief service worker.
    Shell is precached. The encrypted payload is cached as ciphertext so offline
    opens still require the passcode or the stored device key. */
-const VERSION = 'daily-brief-v2';
+const VERSION = 'daily-brief-v3';
 const SHELL = VERSION + '-shell';
 const DATA  = VERSION + '-data';
 
