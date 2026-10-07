@@ -55,6 +55,20 @@ PROTECTED_GISTS = {"fd25c59bbbab14d6ea56532bad7bfa9c"}
 # of today plus tomorrow, because by evening today's agenda is mostly spent.
 EDITION = "evening" if NOW.hour >= 12 else "morning"
 
+# Tile order for each edition. Reorder the names to reorder the page; drop a name
+# to hide that block. Blocks: changed, day, portfolio, crypto_fx, news, markets,
+# reference. Morning leads with the portfolio (the US session has just closed, so
+# those values are fresh); evening leads with the US close and risk gauges, ahead
+# of the US open at about 9:30 PM PHT.
+LAYOUT = {
+    "morning": ["changed", "day", "portfolio", "crypto_fx", "news", "markets", "reference"],
+    "evening": ["changed", "day", "markets", "portfolio", "crypto_fx", "news", "reference"],
+}
+
+# Which provider answered for each index on this run. Filled by indices() and read
+# by the template, so the page names the real source instead of assuming one.
+IDX_ORIGIN = {}
+
 FEEDS = [
     ("PH",         "ph", "https://news.google.com/rss?hl=en-PH&gl=PH&ceid=PH:en"),
     ("Markets",    "mk", "https://news.google.com/rss/search?q=stock+market+OR+Federal+Reserve+when:1d&hl=en-US&gl=US&ceid=US:en"),
@@ -112,10 +126,13 @@ def weather():
     j = r.json()
     cur, hourly = j.get("current", {}), j.get("hourly", {})
     times = hourly.get("time", [])
+    daily = j.get("daily", {})
+    dtimes = daily.get("time", [])
 
-    def slot(target_hour):
+    def slot(target_hour, day=0):
+        want = dtimes[day] if day < len(dtimes) else None
         for i, t in enumerate(times):
-            if int(t[11:13]) == target_hour:
+            if int(t[11:13]) == target_hour and (want is None or t[:10] == want):
                 code = hourly["weather_code"][i]
                 desc, emoji = WMO.get(code, ("—", "\U0001F321️"))
                 return {"temp": round(hourly["temperature_2m"][i]),
@@ -123,11 +140,8 @@ def weather():
                         "desc": desc, "emoji": emoji}
         return None
 
-    daily = j.get("daily", {})
-
     # Next five days, not today. forecast_days=6 is what makes the fifth reachable.
     days = []
-    dtimes = daily.get("time", [])
     for i in range(1, min(6, len(dtimes))):
         code = daily.get("weather_code", [None] * 6)[i]
         ddesc, demoji = WMO.get(code, ("—", "\U0001F321️"))
@@ -149,6 +163,8 @@ def weather():
         "hi": round(daily.get("temperature_2m_max", [0])[0]),
         "lo": round(daily.get("temperature_2m_min", [0])[0]),
         "morning": slot(8), "afternoon": slot(14), "evening": slot(19),
+        # The evening edition shows these instead: by 6 PM today's are spent.
+        "tomorrow": {"morning": slot(8, 1), "afternoon": slot(14, 1), "evening": slot(19, 1)},
         "days": days,
     }
 
@@ -508,6 +524,8 @@ def indices(prev_state=None):
             out[k] = c
             origin[k] = "cache"
 
+    IDX_ORIGIN.clear()
+    IDX_ORIGIN.update(origin)
     if out:
         print("  indices: " + ", ".join(
             f"{k}={out[k]['close']:,.2f} [{origin.get(k, '?')}]" for k in out))
@@ -678,7 +696,10 @@ def calendar_via_ics():
 
 
 def calendar_events():
-    return calendar_via_api() or calendar_via_ics()
+    # None means "not configured"; an empty list means a genuinely clear day.
+    # Only fall through to the iCal path when the API path is not set up at all.
+    evs = calendar_via_api()
+    return evs if evs is not None else calendar_via_ics()
 
 
 # --------------------------------------------------------------- portfolio
@@ -1005,6 +1026,8 @@ def snapshot_state(d):
                           "asof": v.get("asof")}
                       for k, v in (d.get("indices") or {}).items() if v.get("close")},
         "ph_cpi": PRINTS["ph_cpi"][1],
+        "ph_inf_last": (((ph.get("inflation") or {}).get("series") or [None])[-1]),
+        "ph_un_last": (((ph.get("unemployment") or {}).get("series") or [None])[-1]),
         "edition": EDITION,
         "built": NOW.isoformat(),
     }
@@ -1176,61 +1199,156 @@ function median(a){a=a.slice().sort(function(x,y){return x-y;});var m=a.length>>
   return a.length%2?a[m]:(a[m-1]+a[m])/2;}
 function badge(t){var e=document.getElementById('liveBadge'); if(e) e.textContent=t;}
 
-/* ---------- splash ---------- */
+/* ---------- edition stamp + greeting ---------- */
+function ago(t){
+  var m=Math.max(0,Math.round((Date.now()-t.getTime())/60000));
+  if(m<1) return 'just now';
+  if(m<60) return m+'m ago';
+  var h=Math.floor(m/60);
+  return h<24 ? h+'h ago' : Math.floor(h/24)+'d ago';
+}
+function builtInfo(){
+  var e=document.getElementById('builtAgo'); if(!e) return null;
+  var t=new Date(e.getAttribute('data-built')); if(isNaN(t.getTime())) return null;
+  var ed=e.getAttribute('data-edition')||'';
+  return {el:e, t:t, ed:ed.charAt(0).toUpperCase()+ed.slice(1),
+          clock:t.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}),
+          hours:(Date.now()-t.getTime())/3600000};
+}
+/* Builds run 12 hours apart, so anything older than 13 means one was missed. */
+function stamp(){
+  var b=builtInfo(); if(!b) return;
+  b.el.textContent=b.ed+' edition \\u00b7 built '+b.clock+' ('+ago(b.t)+')';
+  b.el.className=b.hours>13?'late':'';
+  b.el.title=b.hours>13?'Older than one build cycle - a scheduled build may have been missed.':'';
+  var g=document.getElementById('greet');
+  if(g){ var h=new Date().getHours();
+    g.textContent=h<12?'Good morning, Justin \\u2600\\ufe0f':
+                  (h<18?'Good afternoon, Justin \\ud83c\\udf24\\ufe0f':'Good evening, Justin \\ud83c\\udf19'); }
+}
+
+/* ---------- splash ----------
+   Rows are grouped by what they feed (GROUPS), not by provider, because "Crypto
+   prices 3 of 3" answers the question you actually have. The per-provider rows
+   (STEPS) sit underneath and open on demand, or by themselves when one fails. */
 var STEPS=[['cb','Coinbase'],['cg','CoinGecko'],['bn','Binance'],
-           ['fx','ECB via Frankfurter'],['fng','Fear & Greed']];
-var timers={}, splashEl=null, settled=0, troubles=0;
+           ['fx','ECB via Frankfurter'],['fng','alternative.me']];
+var GROUPS=[['crypto','Crypto prices',['cb','cg','bn']],
+            ['fxg','Peso FX rates',['fx']],
+            ['sent','Crypto sentiment',['fng']]];
+var MARKS={wait:'\\u00b7',run:'\\u25cc',ok:'\\u2713',warn:'!',fail:'\\u2715'};
+var timers={}, splashEl=null, settled=0, troubles=0, stepState={}, runNo=0;
+
+function stepName(id){ for(var i=0;i<STEPS.length;i++) if(STEPS[i][0]===id) return STEPS[i][1]; return id; }
 
 function buildSplash(){
   var h='<div class="sp-card" role="status" aria-live="polite">'+
     '<div class="sp-title">Refreshing live data</div>'+
-    '<div class="sp-sub">Weather, news and charts come from the last build.</div>'+
+    '<div class="sp-sub" id="sp-built"></div>'+
     '<div class="sp-bar"><div class="sp-fill" id="sp-fill"></div></div><ul class="sp-list">';
-  STEPS.forEach(function(s){
-    h+='<li class="sp-step" id="sp-'+s[0]+'"><span class="sp-ic">\\u00b7</span>'+
-       '<span class="sp-lb">'+s[1]+'</span><span class="sp-st">waiting</span></li>';
+  GROUPS.forEach(function(g){
+    h+='<li id="sp-g-'+g[0]+'"><div class="sp-step"><span class="sp-ic">\\u00b7</span>'+
+       '<span class="sp-lb">'+g[1]+'</span><span class="sp-st">waiting</span></div><ul class="sp-srcs">';
+    g[2].forEach(function(id){
+      h+='<li class="sp-src" id="sp-'+id+'"><span class="sp-ic">\\u00b7</span>'+
+         '<span class="sp-lb">'+stepName(id)+'</span><span class="sp-st">waiting</span></li>';
+    });
+    h+='</ul></li>';
   });
-  h+='</ul><div class="sp-foot">Click outside or press Esc to dismiss</div></div>';
+  h+='</ul><div class="sp-msg" id="sp-msg"></div>'+
+     '<div class="sp-actions"><button type="button" id="sp-more">Show sources</button>'+
+     '<button type="button" id="sp-retry">Retry</button></div>'+
+     '<div class="sp-foot">Tap outside to dismiss</div></div>';
   var el=document.createElement('div');
   el.id='splash'; el.innerHTML=h;
   el.addEventListener('click',function(e){ if(e.target===el) closeSplash(); });
   document.body.appendChild(el);
+  el.querySelector('#sp-more').onclick=function(){ showSources(!el.querySelector('.sp-card').classList.contains('sp-open')); };
+  el.querySelector('#sp-retry').onclick=function(){ refresh(); };
   return el;
 }
+function showSources(on){
+  if(!splashEl) return;
+  splashEl.querySelector('.sp-card').classList.toggle('sp-open',!!on);
+  splashEl.querySelector('#sp-more').textContent=on?'Hide sources':'Show sources';
+}
 function openSplash(){
-  settled=0; troubles=0;
+  settled=0; troubles=0; stepState={}; runNo++;
   if(!splashEl) splashEl=buildSplash();
   STEPS.forEach(function(s){ setStep(s[0],'wait','waiting'); });
   var f=document.getElementById('sp-fill'); if(f) f.style.width='0%';
+  var b=builtInfo(), sub=document.getElementById('sp-built');
+  if(sub) sub.innerHTML=(b?b.ed+' edition \\u00b7 built '+b.clock+' \\u00b7 '+ago(b.t)+'<br>':'')+
+    'Weather, calendar, news and ETF prices come from that build.';
+  var m=document.getElementById('sp-msg'); if(m){ m.style.display='none'; m.innerHTML=''; }
+  var r=document.getElementById('sp-retry'); if(r) r.style.display='none';
+  showSources(false);
   splashEl.style.display='flex';
 }
 function closeSplash(){ if(splashEl) splashEl.style.display='none';
   Object.keys(timers).forEach(function(k){clearInterval(timers[k]);}); timers={}; }
 document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeSplash(); });
 
+function paint(row,state,txt){
+  if(!row) return;
+  var ic=row.querySelector('.sp-ic'), st=row.querySelector('.sp-st');
+  var tone=(state==='ok'?' st-ok':state==='warn'?' st-warn':state==='fail'?' st-fail':'');
+  ic.textContent=MARKS[state]||'\\u00b7';
+  ic.className='sp-ic'+(state==='run'?' sp-spin':'')+tone;
+  st.textContent=txt; st.className='sp-st'+tone;
+}
 function setStep(id,state,txt){
-  var li=document.getElementById('sp-'+id); if(!li) return;
-  var ic=li.querySelector('.sp-ic'), st=li.querySelector('.sp-st');
-  var marks={wait:'\\u00b7',run:'\\u25cc',ok:'\\u2713',warn:'!',fail:'\\u2715'};
-  ic.textContent=marks[state]||'\\u00b7';
-  ic.className='sp-ic'+(state==='run'?' sp-spin':'')+
-    (state==='ok'?' st-ok':state==='warn'?' st-warn':state==='fail'?' st-fail':'');
-  st.textContent=txt; st.className='sp-st'+
-    (state==='ok'?' st-ok':state==='warn'?' st-warn':state==='fail'?' st-fail':'');
+  stepState[id]=state;
+  paint(document.getElementById('sp-'+id),state,txt);
+  paintGroups();
+}
+function paintGroups(){
+  GROUPS.forEach(function(g){
+    var li=document.getElementById('sp-g-'+g[0]); if(!li) return;
+    var n=g[2].length, good=0, done=0, running=0;
+    g[2].forEach(function(id){ var s=stepState[id]||'wait';
+      if(s==='ok') good++;
+      if(s==='ok'||s==='warn'||s==='fail') done++;
+      if(s==='run') running++; });
+    var state, txt;
+    if(done<n){
+      state=(running||done)?'run':'wait';
+      txt=(state==='wait')?'waiting':(n>1?done+' of '+n+' answered':'loading');
+    }else if(good===n){ state='ok';   txt=n>1?n+' of '+n+' sources':'live'; }
+    else if(good>0)   { state='warn'; txt=good+' of '+n+' sources'; }
+    else              { state='fail'; txt='using build value'; }
+    paint(li.querySelector('.sp-step'),state,txt);
+  });
+}
+/* Says what a failure means for the page, not just that it happened. */
+function explain(){
+  var out=[], cr=['cb','cg','bn'];
+  var bad=cr.filter(function(id){ return stepState[id]!=='ok'; });
+  if(bad.length===cr.length){
+    out.push('<b>Crypto:</b> no source answered, so prices and holdings show the build\\u2019s values.');
+  }else if(bad.length){
+    out.push('<b>Crypto:</b> '+bad.map(stepName).join(' and ')+' did not answer. The median uses '+
+             (cr.length-bad.length)+' of '+cr.length+' sources.');
+  }
+  if(stepState.fx!=='ok')  out.push('<b>FX:</b> showing the fix from the build.');
+  if(stepState.fng!=='ok') out.push('<b>Sentiment:</b> showing the reading from the build.');
+  var m=document.getElementById('sp-msg');
+  if(m){ m.innerHTML=out.join('<br>'); m.style.display=out.length?'block':'none'; }
+  var r=document.getElementById('sp-retry'); if(r) r.style.display='inline-block';
+  showSources(true);
 }
 function bumpBar(){
   settled++;
   var f=document.getElementById('sp-fill');
   if(f) f.style.width=Math.round(settled/STEPS.length*100)+'%';
   if(settled < STEPS.length) return;
-  // Clean run: get out of the way. Anything warned or failed: stay put, because
-  // seeing which source broke is the whole point of this overlay.
+  // Clean run: get out of the way. Anything warned or failed: stay put and say
+  // what it means, because seeing which source broke is the point of this overlay.
   if(troubles===0){
-    setTimeout(closeSplash,1100);
+    var mine=runNo;
+    setTimeout(function(){ if(mine===runNo) closeSplash(); },1100);
   }else{
-    var foot=document.querySelector('.sp-foot');
-    if(foot) foot.innerHTML='<b>'+troubles+' source'+(troubles===1?'':'s')+
-      ' did not return data.</b><br>Click outside or press Esc to dismiss';
+    explain();
   }
 }
 
@@ -1397,7 +1515,13 @@ function revaluePortfolio(){
     var qty=parseFloat(r.getAttribute('data-qty'));
     var cost=parseFloat(r.getAttribute('data-cost'));
     var px=LIVEPX[sym];
-    if(px==null||isNaN(qty)) return;
+    if(px==null||isNaN(qty)){
+      // No live price for this coin: keep the build's value in the total.
+      var bv=parseFloat(r.getAttribute('data-val')), bp=parseFloat(r.getAttribute('data-pl'));
+      if(!isNaN(bv)) sum+=bv;
+      if(!isNaN(bp)){ pl+=bp; sawPl=true; }
+      return;
+    }
     var val=px*qty; sum+=val;
     if(!isNaN(cost)){ pl+=(px-cost)*qty; sawPl=true; }
     var a=r.querySelector('[data-pf=price]'),b=r.querySelector('[data-pf=value]'),
@@ -1421,6 +1545,7 @@ var busy=false, last=0;
 async function refresh(){
   if(busy) return;
   busy=true; ok=0;
+  stamp();
   openSplash();
   // Ask the shell to re-check the gist too, so a new edition is picked up
   // rather than only the live prices being refreshed.
@@ -1435,7 +1560,7 @@ async function refresh(){
   }catch(e){}
   var t=new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
   badge(ok===0?'offline \\u2014 last build':(ok===5?'live \\u00b7 '+t:'partly live \\u00b7 '+t));
-  last=Date.now(); busy=false;
+  last=Date.now(); busy=false; stamp();
 }
 window.dbRefresh=refresh;
 refresh();
@@ -1468,10 +1593,21 @@ def build_html(d):
 
     wx = ""
     if w:
+        # Evening edition: today's morning and afternoon are already spent, so the
+        # three slots show tomorrow instead, under a one-line summary of the day.
+        tm = (w.get("tomorrow") or {}) if EDITION == "evening" else {}
+        sl = tm if any(tm.values()) else w
+        tm_line = ""
+        if sl is tm:
+            d1 = (w.get("days") or [None])[0]
+            tm_line = '<div class="fcl">Tomorrow' + (
+                f' \u00b7 {esc(d1["desc"])}, {d1["lo"]}\u2013{d1["hi"]}\u00b0'
+                + (f', {d1["pop"]}% rain' if d1.get("pop") is not None else "")
+                if d1 else "") + "</div>"
         wx = (f'<div><span class="big">{w["temp"]}°C</span> &nbsp;{esc(w["desc"])}'
-              f' · Humidity {w["humidity"]}%</div>'
-              f'<div class="wx">{wx_slot("Morning", w["morning"])}'
-              f'{wx_slot("Afternoon", w["afternoon"])}{wx_slot("Evening", w["evening"])}</div>')
+              f' · Humidity {w["humidity"]}%</div>{tm_line}'
+              f'<div class="wx">{wx_slot("Morning", sl["morning"])}'
+              f'{wx_slot("Afternoon", sl["afternoon"])}{wx_slot("Evening", sl["evening"])}</div>')
     wx_more = ""
     if w and w.get("days"):
         wx_more = ('<div class="fc5">' + "".join(day_cell(x) for x in w["days"])
@@ -1540,7 +1676,12 @@ def build_html(d):
     idx = d["indices"] or {}
 
     _ps = ((d.get("ph") or {}).get("psei") or {})
-    psei_chip = (f'<div class="chip"><div class="n">PSEi</div>'
+    _ps_asof = ""
+    try:
+        _ps_asof = " \u00b7 " + dt.date.fromisoformat(_ps["asof"]).strftime("%-d %b")
+    except Exception:
+        pass
+    psei_chip = (f'<div class="chip"><div class="n">PSEi{_ps_asof}</div>'
                  f'<div class="v">{_ps["close"]:,.2f}</div>'
                  f'<div class="c">{pct_html(_ps.get("pct"))}</div></div>'
                  if _ps.get("close") else
@@ -1568,10 +1709,12 @@ def build_html(d):
     # calendar
     evs = d.get("calendar")
     if evs is None:
-        cal_html = ('<div class="muted">Calendar not configured — add the CALENDAR_ICS_URL '
-                    'secret to show your schedule here.</div>')
+        cal_html = ('<div class="muted">Calendar not configured — add the GOOGLE_SA_JSON and '
+                    'CALENDAR_ID secrets, and share the calendar with the service account.</div>')
     elif not evs:
-        cal_html = '<div class="muted">Nothing on the calendar — a clear day.</div>'
+        cal_html = ('<div class="muted">Nothing left today or tomorrow.</div>'
+                    if EDITION == "evening" else
+                    '<div class="muted">Nothing on the calendar — a clear day.</div>')
     else:
         parts, last_day = [], None
         for e in evs:
@@ -1593,7 +1736,9 @@ def build_html(d):
         pf_html = ('<div class="muted">Portfolio not configured — add the GOOGLE_SA_JSON and '
                    'SHEET_ID secrets, and share the sheet with the service account.</div>')
     elif not pf:
-        pf_html = '<div class="muted">No holdings found in the sheet.</div>'
+        pf_html = ('<div class="muted">No holdings found. The sheet answered but returned no '
+                   'positions — check that the SHEET_RANGE secret names the tab, for example '
+                   '<b>TabName!A1:U20000</b>.</div>')
     else:
         body, tot_v, tot_pl, any_pl = [], 0.0, 0.0, False
         etf_v, etf_pl = 0.0, 0.0
@@ -1612,7 +1757,12 @@ def build_html(d):
             live = ""
             if h["kind"] == "crypto":
                 cost_a = h["cost"] if h["cost"] is not None else ""
-                live = f' data-holding="{h["sym"]}" data-qty="{h["qty"]}" data-cost="{cost_a}"'
+                # data-val / data-pl are the build's figures: the live layer falls back
+                # to them for any coin it cannot price, so the total never drops a holding.
+                val_a = h["value"] if h["value"] else ""
+                pl_a = h["pl"] if h["pl"] is not None else ""
+                live = (f' data-holding="{h["sym"]}" data-qty="{h["qty"]}" data-cost="{cost_a}"'
+                        f' data-val="{val_a}" data-pl="{pl_a}"')
             body.append(
                 f'<tr{live}><td><b>{esc(h["sym"])}</b>'
                 f'<div class="muted">{qty_s} {unit}</div></td>'
@@ -1644,7 +1794,7 @@ def build_html(d):
             return
         if was is None:
             chg.append(f'{name} {now:,.2f}' + (f' ({pct:+.2f}%)' if pct is not None else "") + ".")
-        elif abs(now - was) > 1e-9:
+        elif abs(now - was) >= 0.005:      # ignore moves that round to +0.00
             dd = now - was
             sign = "+" if dd >= 0 else "\u2212"
             chg.append(f'{name} {now:,.2f} from {was:,.2f} ({sign}{abs(dd):,.2f}).')
@@ -1656,12 +1806,23 @@ def build_html(d):
     moved("vix", (idx.get("vix") or {}).get("close"), "VIX")
     moved("usdphp", ((d.get("fx") or {}).get("USD") or {}).get("php"), "USD/PHP")
 
+    # ref_changed opens the collapsed rates-and-indicators section and badges it,
+    # so a monthly print is not missed just because the section is folded away.
+    ref_changed = False
     for k, v in {k: v[0] for k, v in RATES.items()}.items():
         was = (prev.get("rates") or {}).get(k)
         if was not in (None, v):
             chg.append(f'{k.upper()} policy rate now {v}, was {was}.')
+            ref_changed = True
     if prev.get("ph_cpi") not in (None, PRINTS["ph_cpi"][1]):
         chg.append(f'PH inflation print updated to {PRINTS["ph_cpi"][1]}.')
+        ref_changed = True
+    for _key, _name in (("inflation", "ph_inf_last"), ("unemployment", "ph_un_last")):
+        _now = ((phd.get(_key) or {}).get("series") or [None])[-1]
+        _was = prev.get(_name)
+        if _now and _was and list(_now) != list(_was):
+            chg.append(f'PH {_key} series updated: {mon(_now[0])} {_now[1]}%.')
+            ref_changed = True
 
     vx = (idx.get("vix") or {}).get("close")
     pcts = [v.get("pct") for v in (idx.get("spx"), idx.get("ndq"), ps) if v and v.get("pct")]
@@ -1677,9 +1838,8 @@ def build_html(d):
 
     if not chg:
         chg = ["Nothing material moved since the previous edition."]
-    tldr = ('<div class="note"><b>What changed</b><ul>'
-            + "".join(f"<li>{x}</li>" for x in chg)
-            + f'</ul><div style="margin-top:6px">{sentiment}</div></div>')
+    tldr = ('<ul class="chg">' + "".join(f"<li>{x}</li>" for x in chg)
+            + f'</ul><div class="chgsum">{sentiment}</div>')
 
     # Weather alerts + the 5-day strip live together behind one collapsible.
     al = d.get("alerts") or []
@@ -1747,6 +1907,110 @@ def build_html(d):
 
     eq_bul = "".join(f"<li>{b}</li>" for b in g_eq["bullets"])
     cr_bul = "".join(f"<li>{b}</li>" for b in g_cr["bullets"])
+
+
+    # ------------------------------------------------------------------ blocks
+    # Each block is one row of the page. LAYOUT (top of file) decides their order
+    # for the edition being built.
+    evening = EDITION == "evening"
+    greet = ("Good evening, Justin \U0001F319" if evening
+             else "Good morning, Justin \u2600\ufe0f")
+    built_txt = f"{EDITION.capitalize()} edition \u00b7 built {NOW.strftime('%-I:%M %p')}"
+
+    _prov = {"stooq": "Stooq", "yahoo": "Yahoo", "fred-api": "FRED", "fred-csv": "FRED"}
+    _src = sorted({_prov[o] for o in IDX_ORIGIN.values() if o in _prov})
+    _stale = [n for k, n in (("spx", "S&amp;P 500"), ("ndq", "Nasdaq"), ("vix", "VIX"))
+              if IDX_ORIGIN.get(k) == "cache"]
+    idx_note = ("US indices are the last published close"
+                + (f" ({', '.join(_src)})" if _src else "") + ".")
+    if _stale:
+        idx_note += (f" {', '.join(_stale)} carried over from the previous build \u2014 "
+                     "no provider answered this time.")
+    if _ps.get("close"):
+        idx_note += " PSEi is updated by hand in ph_data.json."
+
+    card_wx = (f'<div class="card"><h2>{w["emoji"] if w else ""} Weather \u2014 {CITY["name"]}</h2>'
+               f'{wx}{wx_note}</div>')
+    card_cal = f'<div class="card"><h2>\U0001F4C5 {edition_label}</h2>{cal_html}</div>'
+
+    B = {}
+    B["changed"] = (f'<div class="card solo changed"><h2>\U0001F501 What changed '
+                    f'{"since this morning" if evening else "overnight"}</h2>{tldr}</div>')
+
+    # Evening leads with the schedule: tomorrow's plans matter more than tonight's weather.
+    B["day"] = ('<div class="grid g2">'
+                + (card_cal + card_wx if evening else card_wx + card_cal) + '</div>')
+
+    B["portfolio"] = f'<div class="card solo"><h2>\U0001F4C8 Portfolio</h2>{pf_html}</div>'
+
+    B["markets"] = f"""<div class="grid g2">
+ <div class="card"><h2>\U0001F310 Global Snapshot</h2>
+  <div class="idx">{chip('S&P 500','spx')}{chip('Nasdaq','ndq')}{chip('VIX','vix')}{psei_chip}</div>
+  <div class="muted" style="margin-top:8px">{idx_note}</div>
+ </div>
+ <div class="card"><h2>\U0001F3AF Risk Gauges</h2>
+  <div class="gwrap">
+   <div class="gauge">{gauge_svg(g_eq['score'], EQ_ZONES)}
+    <div class="val">{g_eq['label']}</div><div class="lab">{g_eq['sub']}</div></div>
+   <div class="gauge" id="gauge-cr">{gauge_svg(g_cr['score'], CR_ZONES)}
+    <div class="val">{g_cr['label']}</div><div class="lab">{g_cr['sub']}</div></div>
+  </div>
+  <div class="impl">
+   <div><h3>Equities \u2014 implications</h3><ul>{eq_bul}</ul></div>
+   <div><h3>Crypto \u2014 implications</h3><ul id="cr-bullets">{cr_bul}</ul></div>
+  </div>
+  <div class="muted" style="margin-top:10px">General directional reads from the gauges \u2014 not financial advice.</div>
+ </div>
+</div>
+"""
+
+    B["crypto_fx"] = f"""<div class="grid g2">
+ <div class="card"><h2>\U0001FA99 Crypto</h2>
+  <table><tr><th>Coin</th><th class="num">USD (median)</th><th class="num">24h $</th>
+  <th class="num">24h %</th><th class="num">Src</th></tr>{cr_rows}</table>
+  {cr_note}
+  <div class="muted" style="margin-top:8px">Live on every open. Median of Coinbase, CoinGecko
+  and Binance; a source more than 25% from the median is dropped and named under Src.</div></div>
+ <div class="card"><h2>\U0001F4B1 FX \u2014 Philippine Peso</h2>
+  {fx_main}
+  <details class="coll"><summary>Other currencies</summary>{fx_rest}</details>
+  <div class="muted" style="margin-top:8px">ECB reference fix {fx_asof}.
+  Green \u25bc means the peso strengthened.</div></div>
+</div>
+"""
+
+    B["news"] = f"""<div class="card solo"><h2>\U0001F4F0 News You Follow</h2>
+ <div class="newsgrid">{news_items}</div>
+ <div class="muted" style="margin-top:8px">Headlines open a Google search in a new tab.
+ Refreshed at each build.</div></div>
+"""
+
+    # Slow-moving figures: one always-visible summary line, detail folded beneath.
+    # The fold opens itself, and the heading is badged, on a build where one changed.
+    B["reference"] = f"""<div class="card solo"><h2>\U0001F3DB\ufe0f Rates &amp; PH indicators{' <span class="newdot">Updated</span>' if ref_changed else ''}</h2>
+ <div class="refsum">
+  <div class="rs"><span>BSP</span><b>{RATES['bsp'][0]}</b></div>
+  <div class="rs"><span>Fed</span><b>{RATES['fed'][0]}</b></div>
+  <div class="rs"><span>PH CPI</span><b>{PRINTS['ph_cpi'][1]}</b></div>
+ </div>
+ <details class="coll"{' open' if ref_changed else ''}><summary>Policy rates, prints and charts</summary>
+  <table style="margin-top:9px">
+   <tr><td>\U0001F1F5\U0001F1ED BSP policy rate</td><td class="num"><b>{RATES['bsp'][0]}</b> · {RATES['bsp'][1]}</td></tr>
+   <tr><td>\U0001F1FA\U0001F1F8 Fed funds rate</td><td class="num"><b>{RATES['fed'][0]}</b> · {RATES['fed'][1]}</td></tr>
+   <tr><td>\U0001F1EF\U0001F1F5 BoJ policy rate</td><td class="num"><b>{RATES['boj'][0]}</b> · {RATES['boj'][1]}</td></tr>
+   <tr><td>\U0001F1EA\U0001F1FA ECB deposit rate</td><td class="num"><b>{RATES['ecb'][0]}</b> · {RATES['ecb'][1]}</td></tr>
+   <tr><td>\U0001F1F5\U0001F1ED {PRINTS['ph_cpi'][0]}</td><td class="num"><b>{PRINTS['ph_cpi'][1]}</b> · {PRINTS['ph_cpi'][2]}</td></tr>
+   <tr><td>\U0001F1F5\U0001F1ED {PRINTS['ph_gdp'][0]}</td><td class="num"><b>{PRINTS['ph_gdp'][1]}</b> · {PRINTS['ph_gdp'][2]}</td></tr>
+   <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_cpi'][0]}</td><td class="num"><b>{PRINTS['us_cpi'][1]}</b> · {PRINTS['us_cpi'][2]}</td></tr>
+   <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_claims'][0]}</td><td class="num"><b>{PRINTS['us_claims'][1]}</b> · {PRINTS['us_claims'][2]}</td></tr>
+  </table>
+  <div class="muted" style="margin:8px 0 12px">Policy rates and prints are maintained in the
+  builder config; the charts come from ph_data.json.</div>
+  <div class="refcharts">{ph_html}</div>
+ </details></div>
+"""
+
+    body = "\n".join(B[name] for name in LAYOUT.get(EDITION, LAYOUT["morning"]) if name in B)
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1845,7 +2109,7 @@ details.coll{{margin-top:11px;border-top:1px solid var(--line);padding-top:9px}}
 details.coll>summary{{cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);
  list-style:none;display:flex;justify-content:space-between;align-items:center}}
 details.coll>summary::-webkit-details-marker{{display:none}}
-details.coll>summary::after{{content:"\25BE";transition:transform .15s}}
+details.coll>summary::after{{content:"\\25BE";transition:transform .15s}}
 details.coll[open]>summary::after{{transform:rotate(180deg)}}
 .newsgrid{{display:grid;gap:0}}
 .newsitem{{padding:8px 0;border-bottom:1px solid var(--line);font-size:13.5px;line-height:1.45}}
@@ -1860,18 +2124,45 @@ details.coll[open]>summary::after{{transform:rotate(180deg)}}
 .fxbig{{display:flex;justify-content:space-between;align-items:baseline;gap:10px}}
 .fxbig .v{{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums}}
 footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
+.solo{{margin-bottom:14px}}
+#builtAgo.late{{color:#d9a21b;font-weight:600}}
+.changed ul.chg{{margin:0;padding-left:18px;font-size:13.5px;line-height:1.55}}
+.changed ul.chg li{{margin-bottom:2px}}
+.changed .chgsum{{margin-top:9px;padding-top:9px;border-top:1px solid var(--line);font-size:13px}}
+.refsum{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}}
+.refsum .rs{{background:var(--chip);border:1px solid var(--line);border-radius:10px;
+ padding:8px 10px;min-width:0}}
+.refsum .rs span{{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;
+ letter-spacing:.04em}}
+.refsum .rs b{{font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}}
+.refcharts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:4px 22px}}
+.newdot{{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;
+ background:var(--warn);border:1px solid var(--warn-bd);color:var(--warn-ink);
+ font-size:10px;letter-spacing:.03em;vertical-align:middle}}
+.sp-list li{{list-style:none}}
+.sp-srcs{{display:none;list-style:none;margin:0 0 4px;padding:0 0 0 24px}}
+.sp-open .sp-srcs{{display:block}}
+.sp-src{{display:flex;align-items:center;gap:9px;padding:2px 0;font-size:11.5px;color:var(--muted)}}
+.sp-msg{{display:none;background:var(--warn);border:1px solid var(--warn-bd);color:var(--warn-ink);
+ border-radius:9px;padding:8px 11px;margin-top:10px;font-size:12px;line-height:1.5}}
+.sp-actions{{display:flex;gap:8px;justify-content:center;margin-top:11px}}
+.sp-actions button{{background:var(--card);color:var(--ink);border:1px solid var(--line);
+ border-radius:999px;padding:7px 14px;font-size:12px;cursor:pointer}}
+#sp-retry{{display:none;border-color:var(--accent);color:var(--accent);font-weight:600}}
 .gauge svg{{max-width:100%;height:auto}}
 @media (max-width:480px){{
  body{{padding:12px}}
  .grid{{gap:12px;margin-bottom:12px}}
  .card{{padding:13px;overflow-x:auto}}
+ .solo{{margin-bottom:12px}}
+ .refsum .rs{{padding:7px 8px}} .refsum .rs b{{font-size:13.5px}}
  h1{{font-size:19px}}
  .big{{font-size:26px}}
  table{{font-size:12.5px}}
  td,th{{padding:6px 5px}}
  .wx .slot{{padding:7px 2px}}
  .wx .t,.wx .r{{font-size:10px}}
- .idx .chip{{flex:1 1 100%}}
+ .idx .chip{{flex:1 1 calc(50% - 5px);padding:9px 10px}}
  .impl{{grid-template-columns:1fr;gap:10px}}
  .impl ul{{padding-left:16px}}
  #themeBtn{{padding:9px 15px}}
@@ -1879,79 +2170,19 @@ footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
 }}
 </style></head><body><div class="wrap">
 <header>
- <div><h1>Good morning, Justin ☀️</h1>
- <div class="sub">{NOW.strftime('%A, %B %-d, %Y')} · {CITY['name']} (PHT) · {EDITION.capitalize()} edition {NOW.strftime('%-I:%M %p')} · <span id="liveBadge">…</span></div></div>
+ <div><h1 id="greet">{greet}</h1>
+ <div class="sub">{NOW.strftime('%A, %B %-d, %Y')} · {CITY['name']} (PHT) · <span id="builtAgo" data-built="{NOW.isoformat()}" data-edition="{EDITION}">{built_txt}</span> · <span id="liveBadge">…</span></div></div>
  <div style="white-space:nowrap"><button id="refreshBtn"
   onclick="if(window.dbRefresh)window.dbRefresh()" title="Refetch live prices">\u27f3</button>
  <button id="themeBtn" onclick="tt()">\U0001F319 Dark</button></div>
 </header>
 
-<div class="grid g2">
- <div class="card"><h2>{w['emoji'] if w else ''} Weather — {CITY['name']}</h2>
-  {wx}{wx_note}</div>
- <div class="card"><h2>\U0001F4C5 {edition_label}</h2>
-  {cal_html}</div>
-</div>
-
-<div class="card" style="margin-bottom:14px"><h2>\U0001F4F0 News You Follow</h2>
- <div class="newsgrid">{news_items}</div>
- <div class="muted" style="margin-top:8px">Headlines open a Google search in a new tab.
- Refreshed at each build — 6 AM and 6 PM PHT.</div></div>
-
-<div class="grid g2">
- <div class="card"><h2>\U0001F310 Global Snapshot</h2>
-  <div class="idx">{chip('S&P 500','spx')}{chip('Nasdaq','ndq')}{psei_chip}{chip('VIX','vix')}</div>
-  <table style="margin-top:11px">
-   <tr><td>\U0001F1F5\U0001F1ED BSP policy rate</td><td class="num"><b>{RATES['bsp'][0]}</b> · {RATES['bsp'][1]}</td></tr>
-   <tr><td>\U0001F1FA\U0001F1F8 Fed funds rate</td><td class="num"><b>{RATES['fed'][0]}</b> · {RATES['fed'][1]}</td></tr>
-   <tr><td>\U0001F1EF\U0001F1F5 BoJ policy rate</td><td class="num"><b>{RATES['boj'][0]}</b> · {RATES['boj'][1]}</td></tr>
-   <tr><td>\U0001F1EA\U0001F1FA ECB deposit rate</td><td class="num"><b>{RATES['ecb'][0]}</b> · {RATES['ecb'][1]}</td></tr>
-   <tr><td>\U0001F1F5\U0001F1ED {PRINTS['ph_cpi'][0]}</td><td class="num"><b>{PRINTS['ph_cpi'][1]}</b> · {PRINTS['ph_cpi'][2]}</td></tr>
-   <tr><td>\U0001F1F5\U0001F1ED {PRINTS['ph_gdp'][0]}</td><td class="num"><b>{PRINTS['ph_gdp'][1]}</b> · {PRINTS['ph_gdp'][2]}</td></tr>
-   <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_cpi'][0]}</td><td class="num"><b>{PRINTS['us_cpi'][1]}</b> · {PRINTS['us_cpi'][2]}</td></tr>
-   <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_claims'][0]}</td><td class="num"><b>{PRINTS['us_claims'][1]}</b> · {PRINTS['us_claims'][2]}</td></tr>
-  </table>
-  {tldr}
-  <div class="muted" style="margin-top:8px">Indices are the last published close (FRED).
-  Policy rates are maintained in the builder config.</div>
- </div>
- <div class="card"><h2>\U0001F3AF Risk Gauges</h2>
-  <div class="gwrap">
-   <div class="gauge">{gauge_svg(g_eq['score'], EQ_ZONES)}
-    <div class="val">{g_eq['label']}</div><div class="lab">{g_eq['sub']}</div></div>
-   <div class="gauge" id="gauge-cr">{gauge_svg(g_cr['score'], CR_ZONES)}
-    <div class="val">{g_cr['label']}</div><div class="lab">{g_cr['sub']}</div></div>
-  </div>
-  <div class="impl">
-   <div><h3>Equities — implications</h3><ul>{eq_bul}</ul></div>
-   <div><h3>Crypto — implications</h3><ul id="cr-bullets">{cr_bul}</ul></div>
-  </div>
-  <div class="muted" style="margin-top:10px">General directional reads from the gauges — not financial advice.</div>
- </div>
-</div>
-
-<div class="grid g2">
- <div class="card"><h2>\U0001F4B1 FX — Philippine Peso</h2>
-  {fx_main}
-  <details class="coll"><summary>Other currencies</summary>{fx_rest}</details>
-  <div class="muted" style="margin-top:8px">ECB reference fix {fx_asof}.
-  Green ▼ means the peso strengthened.</div></div>
- <div class="card"><h2>\U0001FA99 Crypto</h2>
-  <table><tr><th>Coin</th><th class="num">USD (median)</th><th class="num">24h $</th>
-  <th class="num">24h %</th><th class="num">Src</th></tr>{cr_rows}</table>
-  {cr_note}
-  <div class="muted" style="margin-top:8px">Median of Coinbase, CoinGecko and Binance.
-  A source more than 25% from the median is dropped and named under Src.</div></div>
-</div>
-
-<div class="grid g2">
- <div class="card"><h2>\U0001F1F5\U0001F1ED PH Indicators</h2>{ph_html}</div>
- <div class="card"><h2>\U0001F4C8 Portfolio</h2>{pf_html}</div>
-</div>
+{body}
 
 <footer>Sources: Open-Meteo, FRED, Frankfurter (ECB), Coinbase, CoinGecko, Binance,
 alternative.me, PSA (via ph_data.json), Google News.
-Rebuilt automatically each morning at 7:30 AM PHT by GitHub Actions.</footer>
+Rebuilt by GitHub Actions at about 6 AM and 6 PM PHT; crypto, FX and sentiment refresh
+on every open.</footer>
 </div>
 <script>
 function ap(t){{document.documentElement.setAttribute('data-theme',t);
