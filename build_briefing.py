@@ -69,12 +69,44 @@ LAYOUT = {
 # by the template, so the page names the real source instead of assuming one.
 IDX_ORIGIN = {}
 
+def _gnews(query, region="US"):
+    """A Google News RSS search limited to the last day."""
+    import urllib.parse as _q
+    loc = "hl=en-PH&gl=PH&ceid=PH:en" if region == "PH" else "hl=en-US&gl=US&ceid=US:en"
+    return f"https://news.google.com/rss/search?q={_q.quote_plus(query + ' when:1d')}&{loc}"
+
+
+# Filipino athletes competing abroad. Edit this list as careers move on; the
+# generic terms after it catch anyone not named here.
+PH_ATHLETES = ["Alex Eala", "EJ Obiena", "Carlos Yulo", "Kai Sotto"]
+
+# News, weighted by interest. Each category is a list of angles, and the tile takes
+# one headline from each angle in turn, so no single angle can fill the category.
+# To re-weight: reorder, add or delete an angle. A category with one angle simply
+# takes its top NEWS_PER_FEED headlines.
 FEEDS = [
-    ("PH",         "ph", "https://news.google.com/rss?hl=en-PH&gl=PH&ceid=PH:en"),
-    ("Markets",    "mk", "https://news.google.com/rss/search?q=stock+market+OR+Federal+Reserve+when:1d&hl=en-US&gl=US&ceid=US:en"),
-    ("Crypto",     "cr", "https://news.google.com/rss/search?q=bitcoin+OR+ethereum+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"),
-    ("Tech/AI",    "ai", "https://news.google.com/rss/search?q=artificial+intelligence+when:1d&hl=en-US&gl=US&ceid=US:en"),
-    ("Sports/Ent", "sp", "https://news.google.com/rss/search?q=sports+OR+entertainment+headlines+when:1d&hl=en-US&gl=US&ceid=US:en"),
+    ("PH", "ph", [
+        _gnews('Philippines (BSP OR "Bangko Sentral" OR economy OR peso OR inflation OR GDP)', "PH"),
+        _gnews('Philippines (Senate OR Congress OR Malacanang OR Comelec OR "Supreme Court" OR policy)', "PH"),
+        _gnews('Philippines (PAGASA OR typhoon OR "tropical storm" OR flood OR earthquake OR Phivolcs)', "PH"),
+    ]),
+    ("Markets", "mk", [
+        _gnews('"Federal Reserve" OR "Treasury yields" OR "US inflation" OR "jobs report"'),
+        _gnews('"Asian markets" OR "Asia stocks" OR "Southeast Asia stocks" OR Nikkei OR "Hang Seng"'),
+        _gnews('"oil prices" OR "Brent crude" OR OPEC OR "gold prices" OR commodities'),
+    ]),
+    ("Crypto", "cr", [
+        _gnews("bitcoin OR ethereum crypto"),
+    ]),
+    ("Tech/AI", "ai", [
+        _gnews("artificial intelligence"),
+    ]),
+    ("Sports", "sp", [
+        _gnews("NBA"),
+        _gnews('golf ("PGA Tour" OR LPGA OR "DP World Tour" OR "LIV Golf" OR "Ryder Cup" OR major)'),
+        _gnews(" OR ".join(f'"{n}"' for n in PH_ATHLETES)
+               + ' OR "Filipino athlete" OR "Filipina athlete" OR "Filipino Olympian"'),
+    ]),
 ]
 
 COINS = [("BTC", "Bitcoin"), ("ETH", "Ethereum"), ("SOL", "Solana"),
@@ -1016,6 +1048,17 @@ def save_state(st):
         print(f"  ! could not write state.json: {type(e).__name__}", file=sys.stderr)
 
 
+def barista_memory(ph, prev):
+    """Current Barista Index plus the value it last changed from. 'barista_was' is
+    carried forward between builds, so the colour persists until the next change
+    instead of lasting for a single edition."""
+    m = (ph.get("barista") or {}).get("minutes")
+    cur = round(m, 1) if m else None
+    old = prev.get("barista")
+    was = old if (old is not None and cur is not None and old != cur) else prev.get("barista_was")
+    return {"barista": cur, "barista_was": was}
+
+
 def snapshot_state(d):
     """The handful of values worth diffing between editions."""
     idx = d.get("indices") or {}
@@ -1036,31 +1079,102 @@ def snapshot_state(d):
         "ph_cpi": PRINTS["ph_cpi"][1],
         "ph_inf_last": (((ph.get("inflation") or {}).get("series") or [None])[-1]),
         "ph_un_last": (((ph.get("unemployment") or {}).get("series") or [None])[-1]),
+        **barista_memory(ph, d.get("prev_state") or {}),
         "edition": EDITION,
         "built": NOW.isoformat(),
     }
 
 
 # -------------------------------------------------------------------- news
+NEWS_PER_FEED = 3
+
+# Titles that are a page, not a story: fixtures, tickers, listings, live blogs.
+_NEWS_JUNK = re.compile(
+    r"\b(scores?|schedules?|standings|fixtures|box score|results|live (stream|blog|updates?)"
+    r"|how to watch|where to watch|odds|picks|highlights|photos|gallery|quiz|horoscope"
+    r"|podcast|newsletter|stock quote|price today)\b", re.I)
+_NEWS_STOP = set("a an the of to in on for and or at by with from as is are was were be "
+                 "its it this that after over into amid says said new".split())
+
+
+def _news_words(title):
+    return {w for w in re.findall(r"[a-z0-9]+", title.lower())
+            if len(w) > 2 and w not in _NEWS_STOP}
+
+
+def _news_ok(title):
+    """A headline you can learn something from: a full clause, not a label.
+    Short titles and fixture/listing pages ("Scores & Schedule", "Eagles") fail."""
+    words = title.split()
+    if len(words) < 6 or len(title) < 35:
+        return False
+    if _NEWS_JUNK.search(title) and len(words) < 11:
+        return False
+    return True
+
+
+def _news_same(a, b):
+    """True when two headlines are the same story from different sites: most of the
+    shorter headline's meaningful words appear in the other."""
+    if not a or not b:
+        return False
+    return len(a & b) / min(len(a), len(b)) >= 0.6
+
+
+def _news_candidates(url):
+    """Usable headlines from one feed, in the feed's own order."""
+    r = get(url)
+    if not r:
+        return [], 0
+    try:
+        root = ET.fromstring(r.content)
+    except ET.ParseError:
+        return [], 0
+    out, thin = [], 0
+    for it in root.iter("item"):
+        t = (it.findtext("title") or "").strip()
+        if not t:
+            continue
+        # Google News titles end " - Publisher"; keep the publisher separately.
+        src = (it.findtext("source") or "").strip()
+        if src and t.endswith(" - " + src):
+            t = t[: -len(src) - 3].strip()
+        elif " - " in t:
+            t, src = [x.strip() for x in t.rsplit(" - ", 1)]
+        if not _news_ok(t):
+            thin += 1
+            continue
+        out.append((t, src))
+    return out, thin
+
+
 def news():
-    items = []
-    for name, tag, url in FEEDS:
-        r = get(url)
-        if not r:
-            continue
-        try:
-            root = ET.fromstring(r.content)
-        except ET.ParseError:
-            continue
+    items, seen = [], []
+    skipped_dup = skipped_thin = 0
+    for name, tag, urls in FEEDS:
+        pools = []
+        for u in urls:
+            cands, thin = _news_candidates(u)
+            skipped_thin += thin
+            pools.append(cands)
+        # One headline per angle, in turn, until the category is full or all run dry.
         count = 0
-        for it in root.iter("item"):
-            t = it.findtext("title")
-            if not t:
-                continue
-            items.append({"tag": name, "cls": tag, "title": t.strip()})
-            count += 1
-            if count >= 3:
-                break
+        while count < NEWS_PER_FEED and any(pools):
+            for pool in pools:
+                while pool:
+                    t, src = pool.pop(0)
+                    w = _news_words(t)
+                    if any(_news_same(w, o) for o in seen):
+                        skipped_dup += 1
+                        continue
+                    seen.append(w)
+                    items.append({"tag": name, "cls": tag, "title": t, "src": src})
+                    count += 1
+                    break
+                if count >= NEWS_PER_FEED:
+                    break
+    print(f"  news: {len(items)} kept, {skipped_dup} duplicates and "
+          f"{skipped_thin} thin titles skipped")
     return items
 
 
@@ -1145,11 +1259,13 @@ def line_svg(series, unit="%"):
     vals = [v for _, v in series]
     lo, hi = min(vals), max(vals)
     span = (hi - lo) or 1
-    W, H, PAD_B, PAD_T = 320, 96, 18, 10
-    step = W / max(len(series) - 1, 1)
+    # PAD_X keeps the first and last dot, value and month label inside the viewBox;
+    # without it they sat on the edges and were cut in half.
+    W, H, PAD_B, PAD_T, PAD_X = 320, 96, 18, 16, 16
+    step = (W - 2 * PAD_X) / max(len(series) - 1, 1)
     pts, dots = [], ""
     for i, (lbl, v) in enumerate(series):
-        x = i * step
+        x = PAD_X + i * step
         y = PAD_T + (1 - (v - lo) / span) * (H - PAD_B - PAD_T)
         pts.append(f"{x:.1f},{y:.1f}")
         dots += (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.6" fill="var(--accent)"/>'
@@ -1476,7 +1592,7 @@ function mergeCrypto(feeds){
     var chs=kept.map(function(k){return q[k][1];}).filter(function(v){return v!=null&&!isNaN(v);});
     var ch=chs.length?median(chs):null;
     LIVEPX[sym]=px; LIVECHG[sym]=ch;
-    var row=document.querySelector('tr[data-coin="'+sym+'"]'); if(!row) return;
+    var row=document.querySelector('[data-coin="'+sym+'"]'); if(!row) return;
     var a=row.querySelector('[data-live=price]'), b=row.querySelector('[data-live=chg]'),
         c=row.querySelector('[data-live=src]'), ab=row.querySelector('[data-live=abs]');
     if(a) a.textContent=money(px);
@@ -1493,7 +1609,7 @@ function mergeCrypto(feeds){
 }
 function applyFx(rates){
   Object.keys(rates||{}).forEach(function(k){
-    var row=document.querySelector('tr[data-fx="'+k+'"]'); if(!row) return;
+    var row=document.querySelector('[data-fx="'+k+'"]'); if(!row) return;
     var v=rates[k], prev=parseFloat(row.getAttribute('data-prev'));
     var a=row.querySelector('[data-fxc=val]'), b=row.querySelector('[data-fxc=abs]'),
         c=row.querySelector('[data-fxc=pct]');
@@ -1679,14 +1795,22 @@ def build_html(d):
 
     FX_COLS = ('<colgroup><col style="width:34%"><col style="width:22%">'
                '<col style="width:22%"><col style="width:22%"></colgroup>')
-    fx_main = (f'<table class="lead">{FX_COLS}<tr><th>Pair</th><th class="num">PHP</th>'
-               f'<th class="num">24h \u20b1</th><th class="num">24h %</th></tr>'
-               f'{fx_row("USD", "USD")}</table>'
-               if fxd.get("USD") else '<div class="muted">USD rate unavailable.</div>')
+    # The lead pair is a headline figure, not a table row: it is the at-a-glance read.
+    _u = fxd.get("USD")
+    fx_main = (f'<div class="lead" data-fx="USD" data-prev="{_u.get("prev") or ""}">'
+               f'<div><div class="lk"><b>USD</b> / PHP</div>'
+               f'<div class="lv" data-fxc="val">{_u["php"]:,.2f}</div></div>'
+               f'<div class="lm"><div data-fxc="pct">{fx_move(_u)}</div>'
+               f'<div data-fxc="abs">{fx_abs(_u)}</div>'
+               f'<div class="ls">vs previous fix</div></div></div>'
+               if _u else '<div class="muted">USD rate unavailable.</div>')
+    FX_HEAD = ('<tr><th>Pair</th><th class="num">PHP</th>'
+               '<th class="num">24h \u20b1</th><th class="num">24h %</th></tr>')
     _fx_others = "".join(fx_row(k, lbl) for k, lbl in
                          [("EUR", "EUR"), ("GBP", "GBP"), ("JPY", "JPY (100)"), ("SGD", "SGD"),
                           ("AUD", "AUD"), ("CNY", "CNY"), ("HKD", "HKD")])
-    fx_rest = f'<table class="rest">{FX_COLS}{_fx_others}</table>' if _fx_others else ""
+    fx_rest = (f'<table class="rest">{FX_COLS}{FX_HEAD}{_fx_others}</table>'
+               if _fx_others else "")
     fx_asof = fxd.get("_asof", "")
 
     def abs_cell(c):
@@ -1723,10 +1847,16 @@ def build_html(d):
     # Both tables share a colgroup so the folded rows line up under the header.
     CR_COLS = ('<colgroup><col style="width:24%"><col style="width:21%">'
                '<col style="width:27%"><col style="width:18%"><col style="width:10%"></colgroup>')
-    cr_main = (f'<table class="lead">{CR_COLS}<tr><th>Coin</th><th class="num">USD (median)</th>'
+    _b, _bn = COINS[0]
+    _bh = have.get(_b)
+    cr_main = (f'<div class="lead" data-coin="{_b}">'
+               f'<div><div class="lk"><b>{_b}</b> {esc(_bn)}</div>'
+               f'<div class="lv" data-live="price">{money(_bh["price"]) if _bh else "—"}</div></div>'
+               f'<div class="lm"><div data-live="chg">{pct_html(_bh["chg"]) if _bh else "—"}</div>'
+               f'<div data-live="abs">{abs_cell(_bh)}</div>'
+               f'<div class="ls">sources <span data-live="src">{src_cell(_bh)}</span></div></div></div>')
+    cr_rest = (f'<table class="rest">{CR_COLS}<tr><th>Coin</th><th class="num">USD (median)</th>'
                f'<th class="num">24h $</th><th class="num">24h %</th><th class="num">Src</th></tr>'
-               f'{cr_row(*COINS[0])}</table>')
-    cr_rest = (f'<table class="rest">{CR_COLS}'
                + "".join(cr_row(sym, name) for sym, name in COINS[1:]) + '</table>')
 
     idx = d["indices"] or {}
@@ -1756,7 +1886,8 @@ def build_html(d):
         f'<div class="newsitem"><span class="tag t-{n["cls"]}">{esc(n["tag"])}</span>'
         f'<a href="https://www.google.com/search?q={_up.quote_plus(n["title"])}" '
         f'target="_blank" rel="noopener noreferrer">{esc(n["title"])}'
-        f'<span class="ext">\u2197</span></a></div>'
+        f'<span class="ext">\u2197</span></a>'
+        f'{(" <span class=nsrc>" + esc(n["src"]) + "</span>") if n.get("src") else ""}</div>'
         for n in (d["news"] or [])
     ) or '<div class="muted">No headlines retrieved.</div>'
 
@@ -1842,7 +1973,7 @@ def build_html(d):
         pf_html = ('<table><tr><th>Holding</th><th class="num">Price</th>'
                    '<th class="num">Value</th><th class="num">Day</th></tr>'
                    + "".join(body) + foot + "</table>"
-                   + '<div class="muted" style="margin-top:8px">Crypto revalues live on every '
+                   + '<div class="cap">Crypto revalues live on every '
                      'open; ETF prices refresh at each build. Last column is day change; the '
                      'total row shows P&amp;L where cost basis is present.</div>')
 
@@ -1935,10 +2066,18 @@ def build_html(d):
         if ba.get("minutes"):
             mins = ba["minutes"]
             hh, mm = int(mins // 60), int(round(mins % 60))
+            # Red when the index rose at its last change (coffee got dearer in
+            # working time), blue when it fell, plain when there is no history yet.
+            _was = barista_memory(ph, d.get("prev_state") or {})["barista_was"]
+            _bcol = ("" if not _was or round(mins, 1) == _was else
+                     ' style="color:var(--down)"' if mins > _was else
+                     ' style="color:var(--accent)"')
+            _bwas = (f' \u00b7 {"up" if mins > _was else "down"} from {_was:,.0f} min'
+                     if _bcol else "")
             ph_html += ('<div class="chartblk"><h4>\u2615 Barista Index</h4>'
-                        f'<div class="fxbig"><div><div class="v">{mins:,.0f}'
+                        f'<div class="fxbig"><div><div class="v"{_bcol}>{mins:,.0f}'
                         '<span style="font-size:15px;font-weight:600"> min</span></div>'
-                        f'<div class="muted">{hh}h {mm:02d}m of work</div></div></div>'
+                        f'<div class="muted">{hh}h {mm:02d}m of work{_bwas}</div></div></div>'
                         '<div class="cap">Minutes a barista on the NCR minimum wage must work '
                         'to afford the cappuccino they just made \u2014 '
                         f'\u20b1{ba["cappuccino_php"]:,.0f} against \u20b1{ba["hourly"]:,.2f} '
@@ -2010,7 +2149,7 @@ def build_html(d):
     B["markets"] = f"""<div class="grid g2">
  <div class="card"><h2>\U0001F310 Global Snapshot</h2>
   <div class="idx">{chip('S&P 500','spx')}{chip('Nasdaq','ndq')}{chip('VIX','vix')}{psei_chip}</div>
-  <div class="muted" style="margin-top:8px">{idx_note}</div>
+  <div class="cap">{idx_note}</div>
  </div>
  <div class="card"><h2>\U0001F3AF Risk Gauges</h2>
   <div class="gwrap">
@@ -2023,7 +2162,7 @@ def build_html(d):
    <div><h3>Equities \u2014 implications</h3><ul>{eq_bul}</ul></div>
    <div><h3>Crypto \u2014 implications</h3><ul id="cr-bullets">{cr_bul}</ul></div>
   </div>
-  <div class="muted" style="margin-top:10px">General directional reads from the gauges \u2014 not financial advice.</div>
+  <div class="cap">General directional reads from the gauges \u2014 not financial advice.</div>
  </div>
 </div>
 """
@@ -2033,19 +2172,19 @@ def build_html(d):
   {cr_main}
   <details class="coll"><summary>Other coins</summary>{cr_rest}</details>
   {cr_note}
-  <div class="muted" style="margin-top:8px">Live on every open. Median of Coinbase, CoinGecko
+  <div class="cap">Live on every open. Median of Coinbase, CoinGecko
   and Binance; a source more than 25% from the median is dropped and named under Src.</div></div>
  <div class="card"><h2>\U0001F4B1 FX \u2014 Philippine Peso</h2>
   {fx_main}
   <details class="coll"><summary>Other currencies</summary>{fx_rest}</details>
-  <div class="muted" style="margin-top:8px">ECB reference fix {fx_asof}; moves are against
+  <div class="cap">ECB reference fix {fx_asof}; moves are against
   the previous fix. Green means the peso strengthened.</div></div>
 </div>
 """
 
     B["news"] = f"""<div class="card solo"><h2>\U0001F4F0 News You Follow</h2>
  <div class="newsgrid">{news_items}</div>
- <div class="muted" style="margin-top:8px">Headlines open a Google search in a new tab.
+ <div class="cap">Headlines open a Google search in a new tab.
  Refreshed at each build.</div></div>
 """
 
@@ -2068,7 +2207,7 @@ def build_html(d):
    <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_cpi'][0]}</td><td class="num"><b>{PRINTS['us_cpi'][1]}</b> · {PRINTS['us_cpi'][2]}</td></tr>
    <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_claims'][0]}</td><td class="num"><b>{PRINTS['us_claims'][1]}</b> · {PRINTS['us_claims'][2]}</td></tr>
   </table>
-  <div class="muted" style="margin:8px 0 12px">Policy rates and prints are maintained in the
+  <div class="cap">Policy rates and prints are maintained in the
   builder config; the charts come from ph_data.json.</div>
   <div class="refcharts">{ph_html}</div>
  </details></div>
@@ -2081,11 +2220,11 @@ def build_html(d):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Daily Brief</title>
 <style>
-:root{{color-scheme:light;--bg:#f6f7f9;--card:#fff;--ink:#1a2233;--muted:#66707f;--line:#e6e9ee;
+:root{{color-scheme:light;--cap:#8a6a12;--bg:#f6f7f9;--card:#fff;--ink:#1a2233;--muted:#66707f;--line:#e6e9ee;
  --accent:#1f5eff;--up:#0a8f4d;--down:#d13b3b;--chip:#fbfcfe;
  --t-ph:#e7f0ff;--t-mk:#e8f7ee;--t-cr:#fdeeee;--t-ai:#f3ecfd;--t-sp:#fff2e2;
  --warn:#fff8e6;--warn-bd:#e9c46a;--warn-ink:#6b5518}}
-[data-theme=dark]{{color-scheme:dark;--bg:#12151c;--card:#1b2029;--ink:#e8ecf3;--muted:#9aa4b2;
+[data-theme=dark]{{color-scheme:dark;--cap:#d8bd72;--bg:#12151c;--card:#1b2029;--ink:#e8ecf3;--muted:#9aa4b2;
  --line:#2a313d;--accent:#6f9bff;--up:#4cc98a;--down:#f07a7a;--chip:#161b23;
  --t-ph:#1d2c4d;--t-mk:#15342a;--t-cr:#402024;--t-ai:#2e2247;--t-sp:#3d2e15;
  --warn:#2e2714;--warn-bd:#6b5518;--warn-ink:#e3c884}}
@@ -2156,7 +2295,11 @@ ul.news li:last-child{{border-bottom:none}}
 .note ul{{margin:4px 0 0;padding-left:16px}} .note li{{margin-bottom:3px}}
 .chartblk{{margin-bottom:12px}}
 .chartblk h4{{font-size:12px;font-weight:600;color:var(--muted);margin-bottom:2px}}
-.chartblk .cap{{font-size:11px;color:var(--muted);margin-top:1px}}
+/* Every explanatory caption on the page: small, amber, out of the way of the data. */
+.cap{{font-size:11px;line-height:1.5;color:var(--cap);margin-top:8px}}
+.nsrc{{font-size:11px;color:var(--muted);white-space:nowrap}}
+.chartblk .cap{{margin-top:2px}}
+details.coll .cap{{margin-bottom:12px}}
 ul.news li a{{color:inherit;text-decoration:none}}
 ul.news li a:hover{{color:var(--accent);text-decoration:underline}}
 .ext{{color:var(--muted);font-size:11px;margin-left:3px}}
@@ -2184,14 +2327,17 @@ details.coll[open]>summary::after{{transform:rotate(-135deg);margin-bottom:-3px}
 .newsitem:last-child{{border-bottom:none}}
 .newsitem a{{color:inherit;text-decoration:none;font-weight:600}}
 .newsitem a:hover{{color:var(--accent);text-decoration:underline}}
-table.lead,table.rest{{table-layout:fixed}}
-table.lead td{{border-bottom:none}}
-table.rest{{margin-top:4px}}
-table.lead td,table.rest td,table.lead th{{padding:7px 4px;font-size:13px;overflow-wrap:anywhere}}
-table.lead th{{font-size:10.5px}}
-table.lead td.num,table.rest td.num{{white-space:nowrap}}
-table.lead td[data-live=abs],table.rest td[data-live=abs],
-table.lead td[data-live=src],table.rest td[data-live=src]{{white-space:normal}}
+.lead{{display:flex;justify-content:space-between;align-items:flex-end;gap:10px}}
+.lead .lk{{font-size:12.5px;color:var(--muted)}} .lead .lk b{{color:var(--ink)}}
+.lead .lv{{font-size:32px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}}
+.lead .lm{{text-align:right;font-size:14.5px;font-weight:600;line-height:1.45;
+ font-variant-numeric:tabular-nums}}
+.lead .ls{{font-size:11px;font-weight:400;color:var(--muted)}}
+table.rest{{table-layout:fixed;margin-top:4px}}
+table.rest td,table.rest th{{padding:7px 4px;font-size:13px;overflow-wrap:anywhere}}
+table.rest th{{font-size:10.5px}}
+table.rest td.num{{white-space:nowrap}}
+table.rest td[data-live=abs],table.rest td[data-live=src]{{white-space:normal}}
 .fxrow{{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
  padding:7px 0;border-bottom:1px solid var(--line);font-size:13.5px}}
 .fxrow:last-child{{border-bottom:none}}
