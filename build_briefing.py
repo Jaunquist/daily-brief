@@ -30,18 +30,20 @@ TIMEOUT = 25
 # Policy rates have no clean free API. Edit these when a central bank moves;
 # the workflow will pick the change up on its next run.
 RATES = {
-    "bsp":  ("4.50%",        "hawkish bias"),
-    "fed":  ("3.50-3.75%",   "hold expected"),
-    "boj":  ("1.00%",        "31-yr high; +25bps seen by year-end"),
-    "ecb":  ("2.15%",        "on hold"),
+    "bsp":  ("5.00%",        "+25 bps on 27 Aug \u00b7 next 22 Oct"),
+    "fed":  ("3.75-4.00%",   "+25 bps on 16 Sep \u00b7 next 28 Oct"),
+    "boj":  ("1.25%",        "+25 bps on 18 Sep \u00b7 next 30 Oct"),
+    "ecb":  ("2.50%",        "+25 bps on 10 Sep \u00b7 next 29 Oct"),
 }
 
 # Slower-moving prints shown beside the policy rates. Edit when a new one lands.
+# "ph_cpi" is only a fallback: ph_indicators() overwrites it from the last point of
+# the inflation series in ph_data.json, so PH inflation is updated in ONE place.
 PRINTS = {
-    "ph_cpi":    ("PH inflation",    "6.1% (Aug)",  "Sep print lands 5 Oct"),
-    "ph_gdp":    ("PH Q2 GDP",       "2.3%",        "H1 growth 2.6%"),
-    "us_cpi":    ("US CPI (y/y)",    "3.4% (Aug)",  "unchanged on July"),
-    "us_claims": ("US jobless claims", "197k",      "week to 26 Sep"),
+    "ph_cpi":    ("PH inflation",    "7.2% (Sep)",  "up from 6.1% in Aug"),
+    "ph_gdp":    ("PH Q2 GDP",       "2.3%",        "Q1 was 2.8% \u00b7 Q3 due 9 Nov"),
+    "us_cpi":    ("US CPI (y/y)",    "3.4% (Aug)",  "unchanged from July \u00b7 Sep due 14 Oct"),
+    "us_claims": ("US jobless claims", "197k",      "week to 3 Oct \u00b7 199k prior week"),
 }
 
 CITY = {"name": "Manila", "lat": 14.5995, "lon": 120.9842}
@@ -1004,6 +1006,22 @@ def crypto_gauge(fg):
             "sub": "Fear & Greed Index", "bullets": CR_BUCKETS[fg_bucket(v)]}
 
 
+def _overdue(series, lag_months, release_day):
+    """Short month name of a figure that should be published by now but is not in
+    the series yet, else None. PSA publishes inflation about the 5th-7th of the
+    following month and the Labour Force Survey about a month after that."""
+    try:
+        back = lag_months if NOW.day >= release_day else lag_months + 1
+        want = NOW.year * 12 + NOW.month - 1 - back
+        last = series[-1][0]
+        have = int(last[:4]) * 12 + int(last[5:7]) - 1
+        if have < want:
+            return dt.date(want // 12, want % 12 + 1, 1).strftime("%b")
+    except Exception:
+        pass
+    return None
+
+
 def ph_indicators():
     """Local PSA figures. There is no public PSA API, so ph_data.json is the source."""
     try:
@@ -1014,6 +1032,23 @@ def ph_indicators():
     for k in ("inflation", "unemployment"):
         if isinstance(d.get(k), dict):
             d[k]["series"] = (d[k].get("series") or [])[-9:]     # cap at 9 months
+    # Flag a series that has fallen behind PSA's release calendar, so a missed
+    # manual update shows on the page instead of passing silently.
+    for k, lag, day in (("inflation", 1, 8), ("unemployment", 2, 10)):
+        if isinstance(d.get(k), dict):
+            d[k]["due"] = _overdue(d[k].get("series") or [], lag, day)
+    # The headline inflation row is taken from the series, not typed in twice.
+    ser = (d.get("inflation") or {}).get("series") or []
+    if ser:
+        (m1, v1) = ser[-1]
+        note = ""
+        if len(ser) > 1:
+            (m0, v0) = ser[-2]
+            note = (f"unchanged from {mon(m0)}" if v1 == v0 else
+                    f'{"up" if v1 > v0 else "down"} from {v0:g}% in {mon(m0)}')
+        if d["inflation"].get("due"):
+            note += ("; " if note else "") + f'{d["inflation"]["due"]} print is due'
+        PRINTS["ph_cpi"] = (PRINTS["ph_cpi"][0], f"{v1:g}% ({mon(m1)})", note)
     b = d.get("barista") or {}
     try:
         hourly = b["wage_daily_php"] / b["hours_per_day"]
@@ -2043,6 +2078,10 @@ def build_html(d):
     wx_note = ('<details class="coll"><summary>Next 5 days &amp; outlook</summary>'
                + wx_more + _alerts + "</details>") if (wx_more or _alerts) else ""
 
+    def due_cap(block):
+        return (f' <b>The {block["due"]} figure should be out by now \u2014 add it to '
+                f'ph_data.json.</b>' if block.get("due") else "")
+
     # PH indicators
     ph = d.get("ph")
     if not ph:
@@ -2056,12 +2095,13 @@ def build_html(d):
                         + bar_svg([(mon(k), v) for k, v in inf["series"]],
                                   lo=inf.get("target_low"), hi=inf.get("target_high"))
                         + '<div class="cap">Shaded band is the BSP 2\u20134% target. '
-                          'Red bars are prints above it.</div></div>')
+                          'Red bars are prints above it.' + due_cap(inf) + '</div></div>')
         un = ph.get("unemployment") or {}
         if un.get("series"):
             ph_html += ('<div class="chartblk"><h4>' + esc(un.get("label", "Unemployment"))
                         + "</h4>" + line_svg([(mon(k), v) for k, v in un["series"]])
-                        + '<div class="cap">PSA Labour Force Survey.</div></div>')
+                        + '<div class="cap">PSA Labour Force Survey.' + due_cap(un)
+                        + '</div></div>')
         ba = ph.get("barista") or {}
         if ba.get("minutes"):
             mins = ba["minutes"]
@@ -2188,6 +2228,21 @@ def build_html(d):
  Refreshed at each build.</div></div>
 """
 
+    PH, US, JP, EU = ("\U0001F1F5\U0001F1ED", "\U0001F1FA\U0001F1F8",
+                      "\U0001F1EF\U0001F1F5", "\U0001F1EA\U0001F1FA")
+
+    def ref_row(flag, label, value, note):
+        """Name in semibold, figure large and bold, commentary small and muted on its
+        own line. The flag already says the country, so a leading "PH "/"US " in the
+        label is dropped (on Windows the flag renders as those same two letters)."""
+        for pre in ("PH ", "US "):
+            if label.startswith(pre):
+                label = label[len(pre):]
+        label = label[:1].upper() + label[1:]
+        return (f'<tr><td class="rl"><span class="fl">{flag}</span>{esc(label)}</td>'
+                f'<td class="num"><div class="rv">{esc(value)}</div>'
+                f'<div class="rn">{esc(note)}</div></td></tr>')
+
     # Slow-moving figures: one always-visible summary line, detail folded beneath.
     # The fold opens itself, and the heading is badged, on a build where one changed.
     B["reference"] = f"""<div class="card solo"><h2>\U0001F3DB\ufe0f Rates &amp; PH indicators{' <span class="newdot">Updated</span>' if ref_changed else ''}</h2>
@@ -2197,18 +2252,20 @@ def build_html(d):
   <div class="rs"><span>PH CPI</span><b>{PRINTS['ph_cpi'][1]}</b></div>
  </div>
  <details class="coll"{' open' if ref_changed else ''}><summary>Policy rates, prints and charts</summary>
-  <table style="margin-top:9px">
-   <tr><td>\U0001F1F5\U0001F1ED BSP policy rate</td><td class="num"><b>{RATES['bsp'][0]}</b> · {RATES['bsp'][1]}</td></tr>
-   <tr><td>\U0001F1FA\U0001F1F8 Fed funds rate</td><td class="num"><b>{RATES['fed'][0]}</b> · {RATES['fed'][1]}</td></tr>
-   <tr><td>\U0001F1EF\U0001F1F5 BoJ policy rate</td><td class="num"><b>{RATES['boj'][0]}</b> · {RATES['boj'][1]}</td></tr>
-   <tr><td>\U0001F1EA\U0001F1FA ECB deposit rate</td><td class="num"><b>{RATES['ecb'][0]}</b> · {RATES['ecb'][1]}</td></tr>
-   <tr><td>\U0001F1F5\U0001F1ED {PRINTS['ph_cpi'][0]}</td><td class="num"><b>{PRINTS['ph_cpi'][1]}</b> · {PRINTS['ph_cpi'][2]}</td></tr>
-   <tr><td>\U0001F1F5\U0001F1ED {PRINTS['ph_gdp'][0]}</td><td class="num"><b>{PRINTS['ph_gdp'][1]}</b> · {PRINTS['ph_gdp'][2]}</td></tr>
-   <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_cpi'][0]}</td><td class="num"><b>{PRINTS['us_cpi'][1]}</b> · {PRINTS['us_cpi'][2]}</td></tr>
-   <tr><td>\U0001F1FA\U0001F1F8 {PRINTS['us_claims'][0]}</td><td class="num"><b>{PRINTS['us_claims'][1]}</b> · {PRINTS['us_claims'][2]}</td></tr>
+  <table class="reft">
+   <tr><th colspan="2">Policy rates</th></tr>
+   {ref_row(PH, "BSP policy rate", *RATES['bsp'])}
+   {ref_row(US, "Fed funds rate", *RATES['fed'])}
+   {ref_row(JP, "BoJ policy rate", *RATES['boj'])}
+   {ref_row(EU, "ECB deposit rate", *RATES['ecb'])}
+   <tr><th colspan="2">Latest prints</th></tr>
+   {ref_row(PH, *PRINTS['ph_cpi'])}
+   {ref_row(PH, *PRINTS['ph_gdp'])}
+   {ref_row(US, *PRINTS['us_cpi'])}
+   {ref_row(US, *PRINTS['us_claims'])}
   </table>
-  <div class="cap">Policy rates and prints are maintained in the
-  builder config; the charts come from ph_data.json.</div>
+  <div class="cap">Maintained by hand: policy rates and US prints in the builder config,
+  PH inflation and jobs in ph_data.json.</div>
   <div class="refcharts">{ph_html}</div>
  </details></div>
 """
@@ -2357,6 +2414,15 @@ footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
 .refsum .rs span{{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;
  letter-spacing:.04em}}
 .refsum .rs b{{font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}}
+table.reft{{margin-top:6px}}
+table.reft th{{padding-top:12px;font-size:10.5px;letter-spacing:.06em}}
+table.reft td{{vertical-align:middle;padding:8px 4px}}
+.reft .rl{{font-weight:600;font-size:13.5px;white-space:nowrap}}
+.reft .fl{{display:inline-block;min-width:1.7em;font-weight:400}}
+.reft .rv{{font-size:17px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums;
+ white-space:nowrap}}
+.reft .rn{{font-size:11.5px;color:var(--muted);line-height:1.35;margin-top:1px;
+ text-wrap:balance}}
 .refcharts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:4px 22px}}
 .newdot{{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;
  background:var(--warn);border:1px solid var(--warn-bd);color:var(--warn-ink);
