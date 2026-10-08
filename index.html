@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow, noarchive">
-<meta name="theme-color" content="#0e1420">
+<meta name="theme-color" content="#1f2328">
 <meta name="color-scheme" content="dark">
 <title>Daily Brief</title>
 
@@ -14,62 +14,77 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Daily Brief">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='6' y='20' width='52' height='34' rx='5' fill='%232563eb'/%3E%3Cpath d='M24 20v-5a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v5' fill='none' stroke='%232563eb' stroke-width='4' stroke-linecap='round'/%3E%3Crect x='6' y='30' width='52' height='6' fill='%231e40af'/%3E%3Crect x='27' y='28' width='10' height='10' rx='2' fill='%23f8fafc'/%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="favicon.png">
 <style>
+/* Palette sampled from icon-512.png: charcoal tile, cream paper, slate ink, warm grey fold. */
+:root{--bg:#1f2328;--card:#272c33;--well:#191c20;--line:#353b44;--line2:#414951;
+  --paper:#f2ece6;--paper-dim:#ded6cc;--muted:#a8a196;--faint:#7d776e;
+  --ok:#8fc7a0;--err:#f0877a;--caution:#c9ad6e}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;
-  background:#0e1420;color:#e6edf6;
+  background:var(--bg);color:var(--paper);
   font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   -webkit-font-smoothing:antialiased;padding:20px;
   padding-top:max(20px,env(safe-area-inset-top));padding-bottom:max(20px,env(safe-area-inset-bottom))}
-.lock{width:100%;max-width:370px;background:#161e2c;border:1px solid #263144;
+.lock{width:100%;max-width:370px;background:var(--card);border:1px solid var(--line);
   border-radius:16px;padding:30px 28px;text-align:center;
   box-shadow:0 10px 40px rgba(0,0,0,.45)}
-.ico{width:52px;height:52px;margin:0 auto 16px;display:block}
+.ico{width:72px;height:72px;margin:0 auto 14px;display:block;border-radius:17px;
+  box-shadow:0 6px 18px rgba(0,0,0,.35)}
 h1{font-size:19px;margin:0 0 5px;font-weight:600;letter-spacing:-.2px}
-.sub{color:#93a3b8;font-size:13px;margin-bottom:22px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:22px}
 input{width:100%;padding:11px 14px;font-size:17px;text-align:center;letter-spacing:.32em;
-  background:#0e1420;border:1px solid #2e3a4e;border-radius:10px;color:#e6edf6;
+  background:var(--well);border:1px solid var(--line2);border-radius:10px;color:var(--paper);
   outline:none;font-family:inherit}
-input:focus{border-color:#3b82f6}
-input::placeholder{letter-spacing:.1em;color:#5b6b82}
+input:focus{border-color:var(--paper)}
+input::placeholder{letter-spacing:.1em;color:var(--faint)}
 button{width:100%;margin-top:11px;padding:11px;font-size:15px;font-weight:600;
-  background:#2563eb;color:#fff;border:0;border-radius:10px;cursor:pointer;font-family:inherit}
-button:hover:not(:disabled){background:#1d4ed8}
+  background:var(--paper);color:var(--bg);border:0;border-radius:10px;cursor:pointer;font-family:inherit}
+button:hover:not(:disabled){background:var(--paper-dim)}
 button:disabled{opacity:.55;cursor:default}
-#installBtn{background:transparent;color:#93a3b8;border:1px solid #2e3a4e;display:none}
-#installBtn:hover{color:#e6edf6;border-color:#3b82f6;background:transparent}
-.msg{margin-top:13px;font-size:12.5px;min-height:17px;color:#93a3b8}
-.msg.err{color:#f87171}
+#installBtn{background:transparent;color:var(--muted);border:1px solid var(--line2);display:none}
+#installBtn:hover{color:var(--paper);border-color:var(--paper);background:transparent}
+.msg{margin-top:13px;font-size:12.5px;min-height:17px;color:var(--muted)}
+.msg.err{color:var(--err)}
 .rem{display:flex;align-items:center;justify-content:center;gap:7px;margin-top:12px;
-  font-size:12.5px;color:#93a3b8;cursor:pointer;user-select:none}
-.rem input{width:auto;margin:0;cursor:pointer;accent-color:#2563eb}
-.foot{margin-top:20px;font-size:11px;color:#5b6b82;line-height:1.6}
-#view{position:fixed;inset:0;width:100%;height:100%;border:0;display:none;background:#0e1420;z-index:1}
+  font-size:12.5px;color:var(--muted);cursor:pointer;user-select:none}
+.rem input{width:auto;margin:0;cursor:pointer;accent-color:var(--paper)}
+.foot{margin-top:20px;font-size:11px;color:var(--faint);line-height:1.6}
+/* Opening sequence. Same rows-with-timings pattern as the briefing's live-data
+   card, so unlock -> decrypt -> live refresh reads as one continuous load. */
+.steps{list-style:none;margin:16px 0 0;padding:0;text-align:left;display:none}
+.lock.busy .steps{display:block}
+.steps li{display:flex;align-items:center;gap:9px;padding:4px 0;font-size:12.5px;color:var(--muted)}
+.steps .ic{width:15px;text-align:center;font-weight:700}
+.steps .lb{flex:1}
+.steps .st{font-size:11.5px;font-variant-numeric:tabular-nums}
+.steps li.run,.steps li.ok{color:var(--paper)}
+.steps li.ok .ic,.steps li.ok .st{color:var(--ok)}
+.steps li.fail .ic,.steps li.fail .st{color:var(--err)}
+.steps li.run .ic{display:inline-block;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* A remembered device skips the form entirely and shows only the sequence. */
+.lock.auto form,.lock.auto #installBtn,.lock.auto .foot{display:none !important}
+#view{position:fixed;inset:0;width:100%;height:100%;border:0;display:none;background:var(--bg);z-index:1}
 #chrome{position:fixed;right:14px;z-index:2147483647;display:none;flex-direction:column;gap:8px;align-items:flex-end;
   bottom:max(14px,env(safe-area-inset-bottom))}
 #chrome button,#chrome .pill{width:auto;margin:0;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  background:#161e2c;color:#e6edf6;border:1px solid #2e3a4e;border-radius:999px;padding:9px 14px;cursor:pointer;opacity:.8;
+  background:var(--card);color:var(--paper);border:1px solid var(--line2);border-radius:999px;padding:9px 14px;cursor:pointer;opacity:.8;
   box-shadow:0 4px 14px rgba(0,0,0,.4)}
-#chrome button:hover{opacity:1;border-color:#f87171;color:#f87171;background:#161e2c}
-#stale{display:none;cursor:default;border-color:#7a6a3a;color:#e3c884}
+#chrome button:hover{opacity:1;border-color:var(--err);color:var(--err);background:var(--card)}
+#stale{display:none;cursor:default;border-color:var(--caution);color:var(--caution)}
 #toast{position:fixed;left:50%;transform:translateX(-50%);top:max(14px,env(safe-area-inset-top));z-index:2147483647;
-  background:#161e2c;border:1px solid #2e3a4e;color:#e6edf6;border-radius:999px;padding:8px 16px;
+  background:var(--card);border:1px solid var(--line2);color:var(--paper);border-radius:999px;padding:8px 16px;
   font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:none;
   box-shadow:0 4px 14px rgba(0,0,0,.4)}
 </style>
 </head>
 <body>
 <div class="lock" id="lock">
-  <svg class="ico" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-    <rect x="6" y="20" width="52" height="34" rx="5" fill="#2563eb"/>
-    <path d="M24 20v-5a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v5" fill="none" stroke="#2563eb" stroke-width="4" stroke-linecap="round"/>
-    <rect x="6" y="30" width="52" height="6" fill="#1e40af"/>
-    <rect x="27" y="28" width="10" height="10" rx="2" fill="#f8fafc"/>
-  </svg>
+  <img class="ico" src="icon-192.png" alt="" width="72" height="72">
   <h1>Daily Brief</h1>
-  <div class="sub">Enter your passcode to unlock.</div>
+  <div class="sub" id="sub">Enter your passcode to unlock.</div>
   <form id="f" autocomplete="off">
     <input id="pw" type="password" placeholder="Passcode"
            autocomplete="current-password" aria-label="Passcode">
@@ -78,8 +93,13 @@ button:disabled{opacity:.55;cursor:default}
   </form>
   <button id="installBtn" type="button">Install app</button>
   <div class="msg" id="msg"></div>
+  <ul class="steps" id="steps" role="status" aria-live="polite">
+    <li id="s-fetch"><span class="ic">&middot;</span><span class="lb">Fetch latest edition</span><span class="st"></span></li>
+    <li id="s-dec"><span class="ic">&middot;</span><span class="lb">Decrypt</span><span class="st"></span></li>
+    <li id="s-open"><span class="ic">&middot;</span><span class="lb">Open briefing</span><span class="st"></span></li>
+  </ul>
   <div class="foot">Contents are encrypted with AES-256-GCM.<br>Decrypted and decompressed entirely in your browser.
-    <br><span style="color:#7a6a3a">&ldquo;Remember&rdquo; stores the decryption key in this browser. Use only on
+    <br><span style="color:var(--caution)">&ldquo;Remember&rdquo; stores the decryption key in this browser. Use only on
     devices you control.</span></div>
 </div>
 
@@ -109,7 +129,42 @@ var msg = document.getElementById('msg');
 var pw  = document.getElementById('pw');
 var go  = document.getElementById('go');
 
+var lockEl = document.getElementById('lock');
+var subEl  = document.getElementById('sub');
+
 function say(t, isErr){ msg.textContent = t; msg.className = isErr ? 'msg err' : 'msg'; }
+
+/* ---------- opening sequence ---------- */
+var MARKS = { wait:'\u00b7', run:'\u25cc', ok:'\u2713', fail:'\u2715' };
+function step(id, state, txt){
+  var li = document.getElementById('s-' + id); if (!li) return;
+  li.className = state === 'wait' ? '' : state;
+  li.querySelector('.ic').textContent = MARKS[state] || MARKS.wait;
+  li.querySelector('.st').textContent = txt || '';
+}
+function resetSteps(){ ['fetch','dec','open'].forEach(function(id){ step(id, 'wait', ''); }); }
+
+/* Runs the three stages, timing each. The error it throws carries .stage so the
+   caller can tell "could not reach the gist" from "wrong key" - they need
+   different handling, and only the second should ever discard a stored key. */
+async function openBrief(decryptFn){
+  lockEl.classList.add('busy');
+  resetSteps();
+  var t0 = Date.now(), html;
+  step('fetch', 'run', '');
+  try { await getPayload(); }
+  catch (e) { step('fetch', 'fail', 'failed'); e.stage = 'fetch'; throw e; }
+  step('fetch', 'ok', servedOffline ? 'offline copy' : ((Date.now() - t0) / 1000).toFixed(1) + 's');
+
+  t0 = Date.now();
+  step('dec', 'run', '');
+  try { html = await decryptFn(); }
+  catch (e) { step('dec', 'fail', 'failed'); e.stage = 'dec'; throw e; }
+  step('dec', 'ok', ((Date.now() - t0) / 1000).toFixed(1) + 's');
+
+  step('open', 'run', '');
+  return html;
+}
 
 function toast(t){
   var el = document.getElementById('toast');
@@ -251,6 +306,7 @@ function render(html){
     document.body.appendChild(fr);
   }
   fr.srcdoc = html;
+  step('open', 'ok', '');
   fr.style.display = 'block';
   document.getElementById('lock').style.display = 'none';
   document.body.style.padding = '0';
@@ -314,29 +370,31 @@ document.getElementById('f').addEventListener('submit', async function(e){
   var pass = pw.value;
   if (!pass) { say('Enter your passcode.', true); return; }
   go.disabled = true; pw.disabled = true;
-  say('Fetching and decrypting…');
+  say('');
   try {
-    var html = await unlock(pass);
-    say('Unlocked.');
+    var html = await openBrief(function(){ return unlock(pass); });
     lastCheck = Date.now();
     render(html);
   } catch (err) {
-    var net = /gist|payload|HTTP|Failed to fetch|NetworkError/i.test(err && err.message || '');
-    say(net ? (err.message || 'Network error.') : 'Incorrect passcode.', true);
+    var net = (err && err.stage === 'fetch') ||
+              /gist|payload|HTTP|Failed to fetch|NetworkError/i.test(err && err.message || '');
+    say(net ? ((err && err.message) || 'Network error.') : 'Incorrect passcode.', true);
     go.disabled = false; pw.disabled = false;
-    pw.value = ''; pw.focus();
+    if (!net) pw.value = '';
+    pw.focus();
   }
 });
 
 (async function tryDevice(){
   var b64 = storedKeyB64();
   if(!b64) { pw.focus(); getPayload().catch(function(){}); return; }
-  say('Verified device — unlocking…');
+  lockEl.classList.add('auto');
+  subEl.textContent = 'Remembered device. Opening your brief…';
   go.disabled = true; pw.disabled = true;
   try{
     var kb = b64ToBytes(b64);
     var key = await crypto.subtle.importKey('raw', kb, {name:'AES-GCM'}, true, ['decrypt']);
-    var html = await decryptWith(key);
+    var html = await openBrief(function(){ return decryptWith(key); });
     liveKey = key;
     lastCheck = Date.now();
     render(html);
@@ -344,8 +402,16 @@ document.getElementById('f').addEventListener('submit', async function(e){
     var fb = document.getElementById('forgetBtn');
     if (fb) fb.title = 'Device remembered for ' + left + ' more day' + (left===1?'':'s');
   }catch(e){
-    forgetDevice();
-    say('Saved device key no longer works — enter your passcode.', true);
+    lockEl.classList.remove('auto');
+    subEl.textContent = 'Enter your passcode to unlock.';
+    if (e && e.stage === 'fetch') {
+      // The network failed, not the key. Keep the device remembered: reopening
+      // with a connection will work without the passcode.
+      say('Could not reach the briefing. Check your connection and reopen, or enter your passcode to retry.', true);
+    } else {
+      forgetDevice();
+      say('Saved device key no longer works — enter your passcode.', true);
+    }
     go.disabled = false; pw.disabled = false; pw.focus();
   }
 })();
