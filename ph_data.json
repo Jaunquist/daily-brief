@@ -1,6 +1,6 @@
 {
   "_README": [
-    "Philippine figures. PSA and the PSE publish no free API, so these are maintained here.",
+    "Philippine figures. PSA and the PSE publish no free API, so these are maintained here. The page flags a series that falls behind PSA's release dates.",
     "Inflation lands ~the 5th of the following month; the Labour Force Survey ~the 8th.",
     "Append the newest month to the END of each series. Charts keep the last 9 entries.",
     "Sources: psa.gov.ph/price-indices/cpi-ir, psa.gov.ph/statistics/labor-force-survey, pse.com.ph"
@@ -18,7 +18,8 @@
       ["2026-05", 6.8],
       ["2026-06", 6.4],
       ["2026-07", 6.2],
-      ["2026-08", 6.1]
+      ["2026-08", 6.1],
+      ["2026-09", 7.2]
     ]
   },
   "unemployment": {
@@ -27,14 +28,15 @@
       ["2026-04", 4.7],
       ["2026-05", 4.8],
       ["2026-06", 4.9],
-      ["2026-07", 6.0]
+      ["2026-07", 6.0],
+      ["2026-08", 5.3]
     ]
   },
   "psei": {
     "_note": "Update after the PH close. 'prev' is the session before, used for the day move.",
-    "close": 6247.11,
-    "prev": 6223.99,
-    "asof": "2026-10-01"
+    "close": 5610.39,
+    "prev": 5736.69,
+    "asof": "2026-10-08"
   },
   "barista": {
     "_note": "Minutes a barista must work to afford the cappuccino they just made.",
