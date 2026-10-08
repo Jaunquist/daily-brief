@@ -3,8 +3,11 @@ name: Build daily briefing
 on:
   schedule:
     # Asia/Manila is UTC+8, so local times are 8 hours behind in UTC.
-    - cron: '0 22 * * *'   # 06:00 PHT (22:00 UTC previous day) - morning edition
-    - cron: '0 10 * * *'   # 18:00 PHT (10:00 UTC same day)     - evening edition
+    # Deliberately NOT on the hour: GitHub queues scheduled runs at minute 0 behind
+    # everyone else's, and this repo's on-the-hour runs were starting 2.5 to 9 hours
+    # late. 05:23 PHT is also after the US close in both summer and winter time.
+    - cron: '23 21 * * *'  # 05:23 PHT (21:23 UTC previous day) - morning edition
+    - cron: '23 9 * * *'   # 17:23 PHT (09:23 UTC same day)     - evening edition
   workflow_dispatch:        # lets you run it by hand from the Actions tab
 
 permissions:
@@ -27,6 +30,14 @@ jobs:
 
       - name: Install dependencies
         run: pip install --quiet requests cryptography icalendar recurring-ical-events google-auth
+
+      # Fails fast, with a readable message, if the wrong file was uploaded as the builder.
+      - name: Check the builder is valid Python
+        run: |
+          python -m py_compile build_briefing.py || {
+            echo "::error file=build_briefing.py::build_briefing.py is not valid Python. Was another file (for example index.html) pasted over it?"
+            exit 1
+          }
 
       # Prints only whether each secret is visible, never its value - safe for public logs.
       - name: Check secrets are visible
