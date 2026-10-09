@@ -741,20 +741,54 @@ def calendar_events():
 
 
 # --------------------------------------------------------------- portfolio
+# Why the portfolio tile is empty, in words the tile can show. Set by sheet_rows().
+PF_WHY = {"msg": ""}
+# Cash balance found on the sheet's CASH row, if any. Set by parse_holdings().
+PF_META = {"cash": None}
+
+
 def sheet_rows():
-    """Read the holdings tab via a service account. Nothing public, nothing expiring."""
-    sheet_id = os.environ.get("SHEET_ID")
-    rng = os.environ.get("SHEET_RANGE", "A1:U20000")
+    """Read the holdings tab via a service account. Nothing public, nothing expiring.
+    On any failure, PF_WHY says which step failed so the tile can name the fix."""
+    sheet_id = (os.environ.get("SHEET_ID") or "").strip()
+    # The workflow passes an unset secret as an EMPTY string, which os.environ.get's
+    # default does not catch - hence "or". An empty range made every request fail.
+    rng = (os.environ.get("SHEET_RANGE") or "").strip()
     if not sheet_id:
+        PF_WHY["msg"] = "The SHEET_ID secret is not set."
         return None
     tok = _sa_token(["https://www.googleapis.com/auth/spreadsheets.readonly"])
     if not tok:
+        PF_WHY["msg"] = ("The GOOGLE_SA_JSON secret is missing or is not a valid "
+                         "service-account key.")
         return None
-    r = get(f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{rng}",
-            headers={"Authorization": f"Bearer {tok}"})
-    if not r:
+    import urllib.parse as _q
+    url = (f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/"
+           + _q.quote(rng or "A1:U20000", safe="!:"))
+    try:
+        r = requests.get(url, timeout=TIMEOUT, headers={"Authorization": f"Bearer {tok}"})
+    except Exception as e:
+        PF_WHY["msg"] = f"Google Sheets could not be reached ({type(e).__name__})."
         return None
-    return r.json().get("values", [])
+    if not r.ok:
+        PF_WHY["msg"] = {
+            400: "Google rejected the range. Check that the SHEET_RANGE secret uses the "
+                 "tab's exact name, for example TabName!A1:U20000.",
+            403: "Google refused access. Share the sheet with the service account's email "
+                 "as Viewer, and check the Google Sheets API is enabled in its project.",
+            404: "No spreadsheet has that id. Check the SHEET_ID secret is the part of the "
+                 "sheet's URL between /d/ and /edit.",
+        }.get(r.status_code, f"Google Sheets answered HTTP {r.status_code}.")
+        print(f"  ! sheet read failed: HTTP {r.status_code}", file=sys.stderr)
+        return None
+    rows = r.json().get("values", [])
+    if not rng:
+        PF_WHY["msg"] = ("The SHEET_RANGE secret is not set, so only the first tab was read. "
+                         "Add it, naming the holdings tab: TabName!A1:U20000.")
+    elif not rows:
+        PF_WHY["msg"] = "That range is empty. Check the tab name in SHEET_RANGE."
+    print(f"  sheet: {len(rows)} row(s) read" + ("" if rng else " (SHEET_RANGE unset: first tab)"))
+    return rows
 
 
 # Header synonyms, matched after lowercasing and stripping spaces/underscores.
@@ -776,7 +810,10 @@ ALIASES = {
     "totalcurrentvalue": "value", "currentvalue": "value", "marketvalue": "value",
     "totalbuyvalue": "buyvalue", "totalcost": "buyvalue",
     "+/-": "pl", "gainloss": "pl", "unrealised": "pl", "unrealized": "pl",
-    "pershare%": "pct", "percent": "pct", "return%": "pct", "change%": "pct",
+    "pershare%": "pct", "percent": "pct", "return%": "pct",
+    # today's move, e.g. a column of =GOOGLEFINANCE(ticker,"changepct")
+    "day%": "day", "day": "day", "daychange": "day", "daychange%": "day", "today%": "day",
+    "1d%": "day", "dailychange%": "day", "changepct": "day", "change%": "day",
     "shareoftotalport": "weight", "weight": "weight", "allocation": "weight",
 }
 
@@ -788,6 +825,7 @@ def parse_holdings(rows):
     """Tolerant of real spreadsheets: the header can be on any of the first 15 rows,
     positions can sit anywhere below it (filtered views leave big row gaps), and the
     sheet's own computed price/value columns are used when present."""
+    PF_META["cash"] = None
     if not rows:
         return []
     hdr_i, cols = None, {}
@@ -829,7 +867,15 @@ def parse_holdings(rows):
         if not sym or len(sym) > 12:
             continue
         kind_raw = str(cell(row, "kind") or "").strip().lower()
-        if any(t in kind_raw for t in NON_HOLDING_TYPES) or sym == "CASH":
+        if sym == "CASH" or kind_raw == "cash":
+            # Not a position, but its balance feeds "Cash on hand".
+            for key in ("value", "buyvalue", "qty"):
+                c = num(cell(row, key))
+                if c:
+                    PF_META["cash"] = c
+                    break
+            continue
+        if any(t in kind_raw for t in NON_HOLDING_TYPES):
             continue
         qty = num(cell(row, "qty"))
         if not qty:
@@ -844,7 +890,9 @@ def parse_holdings(rows):
             "price": num(cell(row, "price")),
             "value": num(cell(row, "value")),
             "pl": num(cell(row, "pl")),
-            "pct": num(cell(row, "pct")),
+            "pct": num(cell(row, "pct")),          # the sheet's own unrealised %
+            "buyvalue": num(cell(row, "buyvalue")),
+            "day": num(cell(row, "day")),          # today's move, if the sheet has it
         }
     out = list(found.values())
     print(f"  holdings: {len(out)} row(s) "
@@ -913,35 +961,121 @@ def stooq_quotes(symbols):
 
 def portfolio(crypto_rows):
     """Prefer the sheet's own price and value columns - they are what Justin sees in
-    his spreadsheet. Only fetch quotes for rows the sheet does not already price."""
+    his spreadsheet. Each row ends up with two separate moves: "day" (today's change,
+    from the sheet if it has such a column, else from a quote) and "upct" (unrealised
+    gain against cost basis). The old tile showed the second under the heading "Day"."""
     rows = parse_holdings(sheet_rows() or [])
     if not rows:
         return None
     spot = {c["sym"]: c for c in (crypto_rows or [])}
     need = [h["sym"] for h in rows
-            if h["price"] is None and h["kind"] == "etf"]
+            if h["kind"] == "etf" and (h["price"] is None or h["day"] is None)]
     quotes = etf_quotes(need) if need else {}
     if need:
-        print(f"  priced {len(quotes)}/{len(need)} holdings the sheet did not price")
+        print(f"  quotes for {len(quotes)}/{len(need)} holdings (price or day move)")
 
     for h in rows:
-        if h["price"] is None:
-            if h["kind"] == "crypto" and h["sym"] in spot:
-                h["price"] = spot[h["sym"]]["price"]
-                h["pct"] = h["pct"] if h["pct"] is not None else spot[h["sym"]]["chg"]
-            else:
-                q = quotes.get(h["sym"])
-                if q:
-                    h["price"] = q["price"]
-                    h["pct"] = h["pct"] if h["pct"] is not None else q["pct"]
-        elif h["kind"] == "crypto" and h["sym"] in spot and h["pct"] is None:
-            h["pct"] = spot[h["sym"]]["chg"]
+        q = spot.get(h["sym"]) if h["kind"] == "crypto" else quotes.get(h["sym"])
+        if h["price"] is None and q:
+            h["price"] = q["price"]
+        if h["day"] is None and q:
+            h["day"] = q.get("chg") if h["kind"] == "crypto" else q.get("pct")
         if h["value"] is None and h["price"] is not None:
             h["value"] = h["price"] * h["qty"]
-        if h["pl"] is None and h["price"] is not None and h["cost"] is not None:
-            h["pl"] = (h["price"] - h["cost"]) * h["qty"]
+        # Cost basis for the whole position: the sheet's total, else unit cost x quantity.
+        h["basis"] = h["buyvalue"] if h["buyvalue"] else (
+            h["cost"] * h["qty"] if h["cost"] is not None else None)
+        if h["pl"] is None and h["value"] is not None and h["basis"]:
+            h["pl"] = h["value"] - h["basis"]
+        # Computed, not read, where possible: a sheet cell may hold 9.0 or 0.09 for 9%.
+        h["upct"] = (h["pl"] / h["basis"] * 100 if (h["pl"] is not None and h["basis"])
+                     else h["pct"])
     rows.sort(key=lambda h: (h["value"] or 0), reverse=True)
+    print(f"  portfolio: day move on {sum(1 for h in rows if h['day'] is not None)}"
+          f"/{len(rows)}, cash row {'found' if PF_META['cash'] else 'not found'}")
     return rows
+
+
+def us_session_label():
+    """Which US session the prices belong to, e.g. "Thursday 8 October's close", or
+    None while the session is open. Weekends are stepped over; US market holidays
+    are not known here, so on a holiday this names the holiday itself."""
+    try:
+        from zoneinfo import ZoneInfo
+        ny = NOW.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        return "the last US close"
+    mins, day = ny.hour * 60 + ny.minute, ny.date()
+    if ny.weekday() < 5 and 570 <= mins < 960:
+        return None
+    if ny.weekday() >= 5 or mins < 570:
+        day -= dt.timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= dt.timedelta(days=1)
+    return day.strftime("%A %-d %B") + "\u2019s close"
+
+
+_NUMWORD = ["none", "one", "two", "three", "four", "five", "six", "seven", "eight",
+            "nine", "ten", "eleven", "twelve"]
+
+
+def pf_commentary(rows, cash):
+    """The short read under the portfolio, built only from the figures in the tile."""
+    def nw(n):
+        return _NUMWORD[n] if 0 <= n < len(_NUMWORD) else str(n)
+
+    def sp(v, d=2):
+        return ("+" if v >= 0 else "\u2212") + f"{abs(v):.{d}f}%"
+
+    def usd(v):
+        return f"${abs(v):,.2f}"
+
+    mv = [h for h in rows if h.get("day") is not None and h.get("value")]
+    label = us_session_label()
+    head = ("Marked to " + label) if label else "US session in progress"
+    out = []
+    if mv:
+        up = [h for h in mv if h["day"] > 0]
+        dn = [h for h in mv if h["day"] < 0]
+        head += " \u2014 " + (
+            f"{nw(len(dn))} of {nw(len(mv))} holdings fell." if len(dn) > len(up) else
+            f"{nw(len(up))} of {nw(len(mv))} holdings rose." if len(up) > len(dn) else
+            "gainers and losers evenly split.")
+        for h in mv:        # dollars this holding moved today
+            h["_d"] = h["value"] - h["value"] / (1 + h["day"] / 100)
+        book = sum(h["_d"] for h in mv)
+        best, worst = max(mv, key=lambda h: h["day"]), min(mv, key=lambda h: h["day"])
+        if len(up) == 1 and len(dn) > 1:
+            lead = f'Only <b>{html.escape(up[0]["sym"])} {sp(up[0]["day"])}</b> finished green.'
+        elif len(dn) == 1 and len(up) > 1:
+            lead = f'Only <b>{html.escape(dn[0]["sym"])} {sp(dn[0]["day"])}</b> finished red.'
+        else:
+            lead = (f'Best <b>{html.escape(best["sym"])} {sp(best["day"])}</b>, worst '
+                    f'<b>{html.escape(worst["sym"])} {sp(worst["day"])}</b>.')
+        out.append(lead + f' The book {"added" if book >= 0 else "gave back"} about '
+                          f'<b>${abs(book):,.0f}</b> on the day.')
+        if len(mv) >= 3:
+            big = sorted(mv, key=lambda h: abs(h["day"]), reverse=True)[:2]
+            hit = max(mv, key=lambda h: abs(h["_d"]))
+            out.append(
+                f'<b>{html.escape(big[0]["sym"])} {sp(big[0]["day"])}</b> and '
+                f'<b>{html.escape(big[1]["sym"])} {sp(big[1]["day"])}</b> were the biggest '
+                f'moves \u2014 {html.escape(hit["sym"])} alone '
+                f'{"added" if hit["_d"] >= 0 else "cost"} ${abs(hit["_d"]):,.0f}.')
+    else:
+        head += " \u2014 no day moves available for these holdings."
+    # The totals line would go stale as crypto reprices live, so it is ETF-only books.
+    priced = [h for h in rows if h.get("value")]
+    based = [h for h in priced if h.get("basis")]
+    if based and len(based) == len(priced) and not any(h["kind"] == "crypto" for h in rows):
+        val, basis = sum(h["value"] for h in based), sum(h["basis"] for h in based)
+        pl = val - basis
+        line = (f'Value is {usd(val)} against a {usd(basis)} cost basis, so unrealised '
+                f'stands at <b>{"+" if pl >= 0 else "\u2212"}{usd(pl)} '
+                f'({sp(pl / basis * 100, 1)})</b>')
+        line += (f'; with {usd(cash)} cash the book is {usd(val + cash)}.' if cash else ".")
+        out.append(line)
+    return head, out
 
 
 # ------------------------------------------------------------------ gauges
@@ -1691,37 +1825,56 @@ function applyFng(d){
   if(ul&&CRB[b]) ul.innerHTML=CRB[b].map(function(x){return '<li>'+x+'</li>';}).join('');
 }
 
+function pfnum(v){
+  if(Math.abs(v)>=10000) return v.toLocaleString('en-US',{maximumFractionDigits:0});
+  if(Math.abs(v)>=1) return v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return v.toFixed(8).replace(/0+$/,'').replace(/\\.$/,'')||'0';
+}
+function pfsigned(v,dec,unit,cur){
+  return '<span class="'+(v>=0?'up':'down')+'">'+(v>=0?'+':'\\u2212')+(cur||'')+
+    Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec})+
+    (unit||'')+'</span>';
+}
+/* Reprices the crypto rows from the live medians, then rebuilds the three totals.
+   A coin with no live price keeps the build's value and P&L in every total. */
 function revaluePortfolio(){
   var rows=document.querySelectorAll('tr[data-holding]');
   if(!rows.length) return;
-  var sum=0,pl=0,sawPl=false;
+  var sum=0,pl=0;
   rows.forEach(function(r){
     var sym=r.getAttribute('data-holding');
     var qty=parseFloat(r.getAttribute('data-qty'));
-    var cost=parseFloat(r.getAttribute('data-cost'));
+    var basis=parseFloat(r.getAttribute('data-basis'));
     var px=LIVEPX[sym];
     if(px==null||isNaN(qty)){
-      // No live price for this coin: keep the build's value in the total.
       var bv=parseFloat(r.getAttribute('data-val')), bp=parseFloat(r.getAttribute('data-pl'));
       if(!isNaN(bv)) sum+=bv;
-      if(!isNaN(bp)){ pl+=bp; sawPl=true; }
+      if(!isNaN(bp)) pl+=bp;
       return;
     }
     var val=px*qty; sum+=val;
-    if(!isNaN(cost)){ pl+=(px-cost)*qty; sawPl=true; }
-    var a=r.querySelector('[data-pf=price]'),b=r.querySelector('[data-pf=value]'),
-        c=r.querySelector('[data-pf=pct]');
-    if(a) a.textContent=money(px);
-    if(b) b.textContent=money(val);
-    if(c) c.innerHTML=pct(LIVECHG[sym]);
+    var a=r.querySelector('[data-pf=price]'), d=r.querySelector('[data-pf=day]'),
+        p=r.querySelector('[data-pf=pl]'), u=r.querySelector('[data-pf=upct]');
+    if(a) a.textContent=pfnum(px);
+    var ch=LIVECHG[sym];
+    if(d&&ch!=null&&!isNaN(ch)) d.innerHTML='<span class="'+(ch>=0?'up':'down')+'">'+
+      (ch>=0?'\\u25b2':'\\u25bc')+' '+Math.abs(ch).toFixed(2)+'%</span>';
+    if(!isNaN(basis)&&basis){
+      var g=val-basis; pl+=g;
+      if(p) p.innerHTML=pfsigned(g,2);
+      if(u) u.innerHTML=pfsigned(g/basis*100,1,'%');
+    }
   });
-  var tc=document.querySelector('[data-pf=total]');
-  if(tc){ var etf=parseFloat(tc.getAttribute('data-etf'))||0;
-    tc.innerHTML='<b>'+money(sum+etf)+'</b>'; }
-  var pc=document.querySelector('[data-pf=totalpl]');
-  if(pc&&pc.getAttribute('data-anypl')==='1'){
-    var e2=parseFloat(pc.getAttribute('data-etfpl'))||0;
-    if(sawPl||e2) pc.innerHTML='<b>'+money(pl+e2)+'</b>';
+  var m=document.querySelector('[data-pf=mkt]'), t=document.querySelector('[data-pf=total]'),
+      u=document.querySelector('[data-pf=upl]');
+  var usd=function(v){return '$'+v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});};
+  var mkt=sum+(m?parseFloat(m.getAttribute('data-etf'))||0:0);
+  if(m) m.textContent=usd(mkt);
+  if(t) t.textContent=usd(mkt+(parseFloat(t.getAttribute('data-cash'))||0));
+  if(u){
+    var tp=pl+(parseFloat(u.getAttribute('data-etfpl'))||0), tb=parseFloat(u.getAttribute('data-basis'))||0;
+    u.innerHTML='<span class="'+(tp>=0?'up':'down')+'">'+(tp>=0?'+':'\\u2212')+usd(Math.abs(tp))+
+      (tb?' ('+(tp>=0?'+':'\\u2212')+Math.abs(tp/tb*100).toFixed(2)+'%)':'')+'</span>';
   }
 }
 
@@ -1963,54 +2116,93 @@ def build_html(d):
     # portfolio
     pf = d.get("portfolio")
     if pf is None:
-        pf_html = ('<div class="muted">Portfolio not configured — add the GOOGLE_SA_JSON and '
-                   'SHEET_ID secrets, and share the sheet with the service account.</div>')
-    elif not pf:
-        pf_html = ('<div class="muted">No holdings found. The sheet answered but returned no '
-                   'positions — check that the SHEET_RANGE secret names the tab, for example '
-                   '<b>TabName!A1:U20000</b>.</div>')
+        pf_html = ('<div class="muted">No holdings to show. '
+                   + esc(PF_WHY["msg"] or "The sheet was read but no row had both a ticker "
+                         "and a quantity under a recognised header.") + '</div>')
     else:
-        body, tot_v, tot_pl, any_pl = [], 0.0, 0.0, False
-        etf_v, etf_pl = 0.0, 0.0
+        def pnum(v):
+            """Plain price, no currency sign: 159.64, or 0.00002 for a micro-cap coin."""
+            if v is None:
+                return "\u2014"
+            if abs(v) >= 10000:          # keeps a five-figure coin price inside a phone
+                return f"{v:,.0f}"
+            return f"{v:,.2f}" if abs(v) >= 1 else (f"{v:.8f}".rstrip("0").rstrip(".") or "0")
+
+        def day_cell(v):
+            if v is None:
+                return '<span class="muted">\u2014</span>'
+            if abs(v) < 0.005:
+                return '<span class="muted">0.00%</span>'
+            return (f'<span class="{"up" if v > 0 else "down"}">'
+                    f'{"\u25b2" if v > 0 else "\u25bc"} {abs(v):.2f}%</span>')
+
+        def signed(v, pat="{:,.2f}", unit=""):
+            if v is None:
+                return '<span class="muted">\u2014</span>'
+            return (f'<span class="{"up" if v >= 0 else "down"}">'
+                    f'{"+" if v >= 0 else "\u2212"}{pat.format(abs(v))}{unit}</span>')
+
+        cash = PF_META.get("cash")
+        has_crypto = any(h["kind"] == "crypto" for h in pf)
+        body = []
+        mkt = etf_v = tot_pl = etf_pl = tot_basis = 0.0
+        any_pl = False
         for h in pf:
+            crypto = h["kind"] == "crypto"
             if h["value"]:
-                tot_v += h["value"]
-                if h["kind"] != "crypto":
-                    etf_v += h["value"]
+                mkt += h["value"]
+                etf_v += 0 if crypto else h["value"]
             if h["pl"] is not None:
                 tot_pl += h["pl"]
+                etf_pl += 0 if crypto else h["pl"]
                 any_pl = True
-                if h["kind"] != "crypto":
-                    etf_pl += h["pl"]
+                tot_basis += h["basis"] or 0
             qty_s = f'{h["qty"]:,.6f}'.rstrip("0").rstrip(".")
-            unit = "units" if h["kind"] == "crypto" else "sh"
             live = ""
-            if h["kind"] == "crypto":
-                cost_a = h["cost"] if h["cost"] is not None else ""
-                # data-val / data-pl are the build's figures: the live layer falls back
-                # to them for any coin it cannot price, so the total never drops a holding.
-                val_a = h["value"] if h["value"] else ""
-                pl_a = h["pl"] if h["pl"] is not None else ""
-                live = (f' data-holding="{h["sym"]}" data-qty="{h["qty"]}" data-cost="{cost_a}"'
-                        f' data-val="{val_a}" data-pl="{pl_a}"')
+            if crypto:
+                # The build's own figures ride along as the fallback for any coin the
+                # live layer cannot price, so a total never silently drops a holding.
+                live = (f' data-holding="{h["sym"]}" data-qty="{h["qty"]}"'
+                        f' data-basis="{h["basis"] if h["basis"] else ""}"'
+                        f' data-val="{h["value"] if h["value"] else ""}"'
+                        f' data-pl="{h["pl"] if h["pl"] is not None else ""}"')
             body.append(
-                f'<tr{live}><td><b>{esc(h["sym"])}</b>'
-                f'<div class="muted">{qty_s} {unit}</div></td>'
-                f'<td class="num" data-pf="price">{money(h["price"])}</td>'
-                f'<td class="num" data-pf="value">{money(h["value"])}</td>'
-                f'<td class="num" data-pf="pct">{pct_html(h["pct"])}</td></tr>')
-        pl_cell = f"<b>{money(tot_pl)}</b>" if any_pl else ""
-        foot = (f'<tr><td><b>Total</b></td><td></td>'
-                f'<td class="num" data-pf="total" data-etf="{etf_v:.10f}">'
-                f'<b>{money(tot_v)}</b></td>'
-                f'<td class="num" data-pf="totalpl" data-etfpl="{etf_pl:.10f}" '
-                f'data-anypl="{1 if any_pl else 0}">{pl_cell}</td></tr>')
-        pf_html = ('<table><tr><th>Holding</th><th class="num">Price</th>'
-                   '<th class="num">Value</th><th class="num">Day</th></tr>'
-                   + "".join(body) + foot + "</table>"
-                   + '<div class="cap">Crypto revalues live on every '
-                     'open; ETF prices refresh at each build. Last column is day change; the '
-                     'total row shows P&amp;L where cost basis is present.</div>')
+                f'<tr{live}><td><b>{esc(h["sym"])}</b></td>'
+                f'<td class="num">{qty_s}</td>'
+                f'<td class="num" data-pf="price">{pnum(h["price"])}</td>'
+                f'<td class="num" data-pf="day">{day_cell(h["day"])}</td>'
+                f'<td class="num" data-pf="pl">{signed(h["pl"])}</td>'
+                f'<td class="num" data-pf="upct">{signed(h["upct"], "{:.1f}", "%")}</td></tr>')
+
+        total = mkt + (cash or 0)
+        pl_txt = ""
+        if any_pl:
+            pct_txt = (f' ({"+" if tot_pl >= 0 else "\u2212"}{abs(tot_pl / tot_basis * 100):.2f}%)'
+                       if tot_basis else "")
+            pl_txt = (f'<span class="{"up" if tot_pl >= 0 else "down"}">'
+                      f'{"+" if tot_pl >= 0 else "\u2212"}${abs(tot_pl):,.2f}{pct_txt}</span>')
+        summ = (f'<div class="pfrow"><span>{"Holdings" if has_crypto else "Stocks"} at market</span>'
+                f'<b data-pf="mkt" data-etf="{etf_v:.10f}">${mkt:,.2f}</b></div>')
+        if cash:
+            summ += f'<div class="pfrow"><span>Cash on hand</span><b>${cash:,.2f}</b></div>'
+        summ += (f'<div class="pfrow pftot"><span><b>Total portfolio</b></span>'
+                 f'<b data-pf="total" data-cash="{cash or 0:.10f}">${total:,.2f}</b></div>')
+        if any_pl:
+            summ += (f'<div class="pfrow"><span>Unrealized P&amp;L</span>'
+                     f'<b data-pf="upl" data-etfpl="{etf_pl:.10f}" '
+                     f'data-basis="{tot_basis:.10f}">{pl_txt}</b></div>')
+
+        head, bullets = pf_commentary(pf, cash)
+        note = (f'<div class="pfnote"><b>{head}</b>'
+                + ("<ul>" + "".join(f"<li>{x}</li>" for x in bullets) + "</ul>" if bullets else "")
+                + "</div>")
+        pf_html = ('<table class="pft"><tr><th>Ticker</th><th class="num">Qty</th>'
+                   '<th class="num">Price</th><th class="num">Day</th>'
+                   '<th class="num">Unreal. $</th><th class="num">%</th></tr>'
+                   + "".join(body) + "</table>"
+                   + f'<div class="pfsum">{summ}</div>' + note
+                   + ('<div class="cap">Crypto rows and the totals reprice live on every '
+                      'open; everything else is from the build.</div>' if has_crypto else ""))
 
     # "What changed" - diffed against the previous edition's state.json.
     prev = d.get("prev_state") or {}
@@ -2404,6 +2596,15 @@ table.rest td[data-live=abs],table.rest td[data-live=src]{{white-space:normal}}
 .fxbig .v{{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums}}
 footer{{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.6}}
 .solo{{margin-bottom:14px}}
+table.pft th,table.pft td{{padding:8px 4px;white-space:nowrap}}
+table.pft th{{font-size:10.5px;letter-spacing:.04em}}
+table.pft td{{font-size:13px}}
+.pfsum{{border-top:1px solid var(--line);margin-top:2px;padding-top:8px}}
+.pfrow{{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+ padding:4px 4px;font-size:13.5px;font-variant-numeric:tabular-nums}}
+.pfrow.pftot{{border-top:1px solid var(--line);margin-top:6px;padding-top:10px}}
+.pfnote{{color:var(--cap);font-size:12px;line-height:1.5;margin-top:10px}}
+.pfnote ul{{margin:4px 0 0;padding-left:18px}} .pfnote li{{margin-bottom:3px}}
 #builtAgo.late{{color:#d9a21b;font-weight:600}}
 .changed ul.chg{{margin:0;padding-left:18px;font-size:13.5px;line-height:1.55}}
 .changed ul.chg li{{margin-bottom:2px}}
@@ -2443,6 +2644,8 @@ table.reft td{{vertical-align:middle;padding:8px 4px}}
  .grid{{gap:12px;margin-bottom:12px}}
  .card{{padding:13px;overflow-x:auto}}
  .solo{{margin-bottom:12px}}
+ table.pft th,table.pft td{{padding:7px 3px}}
+ table.pft td{{font-size:12.5px}} table.pft th{{font-size:9.5px}}
  .refsum .rs{{padding:7px 8px}} .refsum .rs b{{font-size:13.5px}}
  h1{{font-size:19px}}
  .big{{font-size:26px}}
