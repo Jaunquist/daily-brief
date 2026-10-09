@@ -67,6 +67,15 @@ button:disabled{opacity:.55;cursor:default}
 /* A remembered device skips the form entirely and shows only the sequence. */
 .lock.auto form,.lock.auto #installBtn,.lock.auto .foot{display:none !important}
 #view{position:fixed;inset:0;width:100%;height:100%;border:0;display:none;background:var(--bg);z-index:1}
+/* "Flow" mode, switched on when the briefing reports its height. The frame becomes
+   as tall as the briefing and THIS document scrolls, so the phone has one scroller
+   and applies its native momentum. overscroll-behavior stops the browser's own
+   pull-to-reload, which would re-lock a device that is not remembered; the
+   briefing has its own pull-to-refresh instead. */
+html.flow,html.flow body{height:auto}
+html.flow{overscroll-behavior-y:contain}
+html.flow body{display:block;min-height:100vh;min-height:100dvh;padding:0}
+html.flow #view{position:static;display:block;inset:auto}
 #chrome{position:fixed;right:14px;z-index:2147483647;display:none;flex-direction:column;gap:8px;align-items:flex-end;
   bottom:max(14px,env(safe-area-inset-bottom))}
 #chrome button,#chrome .pill{width:auto;margin:0;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -172,14 +181,51 @@ function toast(t){
   setTimeout(function(){ el.style.display = 'none'; }, 2600);
 }
 
+/* ---------- one scroller: the frame is as tall as the briefing ---------- */
+var pageBg = '', vpTimer = null;
+function tellViewport(){
+  var fr = document.getElementById('view');
+  if (!fr || !fr.contentWindow) return;
+  try {
+    fr.contentWindow.postMessage({ dailyBriefViewport: {
+      top: -fr.getBoundingClientRect().top, height: window.innerHeight } }, '*');
+  } catch (e) {}
+}
+/* Told at once when at the very top (pull-to-refresh needs to know), otherwise only
+   after scrolling settles, so nothing runs per frame while the page is moving. */
+function onShellScroll(){
+  if ((window.pageYOffset || 0) <= 0) { clearTimeout(vpTimer); tellViewport(); return; }
+  clearTimeout(vpTimer);
+  vpTimer = setTimeout(tellViewport, 120);
+}
+function growFrame(h){
+  var fr = document.getElementById('view');
+  if (!fr || !(h > 0)) return;
+  var root = document.documentElement;
+  if (!root.classList.contains('flow')) {
+    root.classList.add('flow');
+    fr.setAttribute('scrolling', 'no');
+    if (pageBg) document.body.style.background = pageBg;
+    window.addEventListener('scroll', onShellScroll, { passive: true });
+    window.addEventListener('resize', tellViewport);
+  }
+  fr.style.height = Math.ceil(h) + 'px';
+  tellViewport();
+}
+
 /* ---------- status bar follows the briefing's theme (Android standalone) ---------- */
 window.addEventListener('message', function(e){
   var d = e && e.data;
   if (!d) return;
   if (d.dailyBriefTheme) {
+    var col = d.dailyBriefTheme === 'dark' ? '#12151c' : '#f6f7f9';
     var m = document.querySelector('meta[name="theme-color"]');
-    if (m) m.setAttribute('content', d.dailyBriefTheme === 'dark' ? '#12151c' : '#f6f7f9');
+    if (m) m.setAttribute('content', col);
+    pageBg = col;
+    if (document.documentElement.classList.contains('flow')) document.body.style.background = col;
   }
+  // The briefing reports its height: size the frame to it and let this page scroll.
+  if (d.dailyBriefHeight) growFrame(d.dailyBriefHeight);
   // The briefing's refresh button asks the shell to re-check for a new edition.
   if (d.dailyBriefCheck) checkFresh(true);
 });
