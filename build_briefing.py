@@ -30,21 +30,33 @@ TIMEOUT = 25
 # Policy rates have no clean free API. Edit these when a central bank moves;
 # the workflow will pick the change up on its next run.
 RATES = {
-    "bsp":  ("5.00%",        "+25 bps on 27 Aug \u00b7 next 22 Oct"),
-    "fed":  ("3.75-4.00%",   "+25 bps on 16 Sep \u00b7 next 28 Oct"),
-    "boj":  ("1.25%",        "+25 bps on 18 Sep \u00b7 next 30 Oct"),
-    "ecb":  ("2.50%",        "+25 bps on 10 Sep \u00b7 next 29 Oct"),
+    "bsp":  ("5.00%",        "27 Aug · next 22 Oct"),
+    "fed":  ("3.75-4.00%",   "16 Sep · next 28 Oct"),
+    "boj":  ("1.25%",        "18 Sep · next 30 Oct"),
+    "ecb":  ("2.50%",        "10 Sep · next 29 Oct"),
 }
 
 # Slower-moving prints shown beside the policy rates. Edit when a new one lands.
 # "ph_cpi" is only a fallback: ph_indicators() overwrites it from the last point of
 # the inflation series in ph_data.json, so PH inflation is updated in ONE place.
 PRINTS = {
-    "ph_cpi":    ("PH inflation",    "7.2% (Sep)",  "up from 6.1% in Aug"),
-    "ph_gdp":    ("PH Q2 GDP",       "2.3%",        "Q1 was 2.8% \u00b7 Q3 due 9 Nov"),
-    "us_cpi":    ("US CPI (y/y)",    "3.4% (Aug)",  "unchanged from July \u00b7 Sep due 14 Oct"),
-    "us_claims": ("US jobless claims", "197k",      "week to 3 Oct \u00b7 199k prior week"),
+    "ph_cpi":    ("PH inflation",    "7.2% (Sep)",  "from 6.1% in Aug"),
+    "ph_gdp":    ("PH Q2 GDP",       "2.3%",        "Q1 was 2.8% · Q3 due 9 Nov"),
+    "us_cpi":    ("US CPI (y/y)",    "3.4% (Aug)",  "same as July · Sep due 14 Oct"),
+    "us_claims": ("US jobless claims", "197k",      "week to 3 Oct · 199k prior week"),
 }
+
+# The latest move in each figure above, as (signed amount, unit). It is what gets
+# colour-coded, the way the Global Snapshot colours an index's day change. Edit it
+# together with the figure. "ph_cpi" and "ph_jobs" are filled from ph_data.json.
+MOVES = {
+    "bsp": (25, "bps"), "fed": (25, "bps"), "boj": (25, "bps"), "ecb": (25, "bps"),
+    "ph_cpi": (1.1, "pts"), "ph_gdp": (-0.5, "pts"), "us_cpi": (0, "pts"),
+    "us_claims": (-2, "k"),
+}
+# Colour follows what the move means, not its direction: dearer money, faster
+# inflation and more jobless are red; only for these is a rise green.
+RISE_IS_GOOD = {"ph_gdp"}
 
 CITY = {"name": "Manila", "lat": 14.5995, "lon": 120.9842}
 
@@ -1178,11 +1190,14 @@ def ph_indicators():
         note = ""
         if len(ser) > 1:
             (m0, v0) = ser[-2]
-            note = (f"unchanged from {mon(m0)}" if v1 == v0 else
-                    f'{"up" if v1 > v0 else "down"} from {v0:g}% in {mon(m0)}')
+            note = (f"same as {mon(m0)}" if v1 == v0 else f"from {v0:g}% in {mon(m0)}")
+            MOVES["ph_cpi"] = (round(v1 - v0, 2), "pts")
         if d["inflation"].get("due"):
             note += ("; " if note else "") + f'{d["inflation"]["due"]} print is due'
         PRINTS["ph_cpi"] = (PRINTS["ph_cpi"][0], f"{v1:g}% ({mon(m1)})", note)
+    ser = (d.get("unemployment") or {}).get("series") or []
+    if len(ser) > 1:
+        MOVES["ph_jobs"] = (round(ser[-1][1] - ser[-2][1], 2), "pts")
     b = d.get("barista") or {}
     try:
         hourly = b["wage_daily_php"] / b["hours_per_day"]
@@ -1590,6 +1605,7 @@ function openSplash(){
   var r=document.getElementById('sp-retry'); if(r) r.style.display='none';
   showSources(false);
   splashEl.style.display='flex';
+  placeSplash();
 }
 function closeSplash(){ if(splashEl) splashEl.style.display='none';
   Object.keys(timers).forEach(function(k){clearInterval(timers[k]);}); timers={}; }
@@ -1900,6 +1916,68 @@ async function refresh(){
   badge(ok===0?'offline \\u2014 last build':(ok===5?'live \\u00b7 '+t:'partly live \\u00b7 '+t));
   last=Date.now(); busy=false; stamp();
 }
+/* ---------- embedding ----------
+   The shell makes the frame as tall as the page and scrolls its own document, so
+   there is exactly one scroller and the phone's native momentum applies. The page
+   reports its height; the shell reports which slice of the page is on screen (VT,
+   VH), which is needed to centre the overlay and to know when we are at the top. */
+var EMB=false, VT=0, VH=0;
+function sayHeight(){ try{ parent.postMessage({dailyBriefHeight:document.body.offsetHeight},'*'); }catch(e){} }
+function placeSplash(){
+  if(!EMB||!splashEl) return;
+  splashEl.style.position='absolute'; splashEl.style.bottom='auto';
+  splashEl.style.top=Math.max(0,VT)+'px'; splashEl.style.height=VH+'px';
+}
+if(window.parent!==window){
+  sayHeight();
+  window.addEventListener('load',sayHeight);
+  if(window.ResizeObserver) new ResizeObserver(sayHeight).observe(document.body);
+  window.addEventListener('message',function(e){
+    if(e.source!==window.parent) return;
+    var v=e.data&&e.data.dailyBriefViewport; if(!v) return;
+    if(!EMB){ EMB=true; document.documentElement.classList.add('embedded'); }
+    VT=v.top; VH=v.height;
+    if(splashEl&&splashEl.style.display==='flex') placeSplash();
+  });
+}
+
+/* ---------- pull down to refresh ----------
+   Refreshes the live figures and asks the shell to look for a new edition. It does
+   not reload the page, so a device that is not remembered stays unlocked. All the
+   listeners are passive: they never hold up a scroll. */
+var pull=null, ptrEl=null;
+function atTop(){ return EMB ? VT<=0 : (window.pageYOffset||document.documentElement.scrollTop||0)<=0; }
+function ptr(txt,dy){
+  if(!ptrEl){ ptrEl=document.createElement('div'); ptrEl.id='ptr'; document.body.appendChild(ptrEl); }
+  if(txt==null){ ptrEl.style.display='none'; return; }
+  ptrEl.textContent=txt; ptrEl.style.display='block';
+  ptrEl.style.top=(8+Math.min(dy,140)*0.35)+'px';
+}
+document.addEventListener('touchstart',function(e){
+  var open=splashEl&&splashEl.style.display==='flex';
+  pull=(e.touches.length===1&&atTop()&&!open&&!busy)?
+       {x:e.touches[0].clientX,y:e.touches[0].clientY,d:0}:null;
+},{passive:true});
+document.addEventListener('touchmove',function(e){
+  if(!pull) return;
+  var dy=e.touches[0].clientY-pull.y, dx=Math.abs(e.touches[0].clientX-pull.x);
+  if(dy<-6||dx>Math.max(12,dy)||!atTop()){ pull=null; ptr(null); return; }
+  pull.d=dy;
+  if(dy>24) ptr(dy>90?'Release to refresh':'Pull to refresh',dy);
+},{passive:true});
+function endPull(){ if(!pull) return; var go=pull.d>90; pull=null; ptr(null); if(go) refresh(); }
+document.addEventListener('touchend',endPull,{passive:true});
+document.addEventListener('touchcancel',function(){ pull=null; if(ptrEl) ptr(null); },{passive:true});
+
+/* ---------- folds remember whether you left them open ---------- */
+Array.prototype.forEach.call(document.querySelectorAll('details[data-k]'),function(el){
+  var key='briefing-fold-'+el.getAttribute('data-k');
+  try{ var v=localStorage.getItem(key); if(v==='1') el.open=true; else if(v==='0') el.open=false; }catch(e){}
+  el.addEventListener('toggle',function(){
+    try{ localStorage.setItem(key,el.open?'1':'0'); }catch(e){}
+  });
+});
+
 window.dbRefresh=refresh;
 refresh();
 document.addEventListener('visibilitychange',function(){
@@ -2096,22 +2174,36 @@ def build_html(d):
         evs = sorted(evs, key=lambda e: (max(e["when"].date(), _today),
                                          not (e["allday"] or e["when"].date() < _today),
                                          e["when"], e["title"]))
-        parts, last_day = [], None
+        today_rows, later, later_n, last_day = [], [], 0, None
         for e in evs:
             day = max(e["when"].date(), _today)
-            if day != last_day:
-                lbl = ("Today" if day == _today else
-                       "Tomorrow \u00b7 " + day.strftime("%a %-d %b")
-                       if day == _today + dt.timedelta(days=1) else day.strftime("%a %-d %b"))
-                parts.append(f'<tr><th colspan="2">{lbl}</th></tr>')
-                last_day = day
             t = ("ongoing" if e["when"].date() < _today else
                  "all day" if e["allday"] else e["when"].strftime("%-I:%M %p"))
             where = f'<div class="muted">{esc(e["where"][:60])}</div>' if e["where"] else ""
-            parts.append(
-                f'<tr><td class="num" style="white-space:nowrap;vertical-align:top">{t}</td>'
-                f'<td>{esc(e["title"])}{where}</td></tr>')
-        cal_html = "<table>" + "".join(parts) + "</table>"
+            row = (f'<tr><td class="num" style="white-space:nowrap;vertical-align:top">{t}</td>'
+                   f'<td>{esc(e["title"])}{where}</td></tr>')
+            if day == _today:
+                today_rows.append(row)
+                continue
+            if day != last_day:
+                lbl = ("Tomorrow · " + day.strftime("%a %-d %b")
+                       if day == _today + dt.timedelta(days=1) else day.strftime("%a %-d %b"))
+                later.append(f'<tr><th colspan="2">{lbl}</th></tr>')
+                last_day = day
+            later.append(row)
+            later_n += 1
+        # Today is always on show; the days after it sit behind a fold.
+        cal_html = ('<table class="cal"><tr><th colspan="2">Today</th></tr>'
+                    + ("".join(today_rows) or
+                       '<tr><td colspan="2" class="muted">Nothing on today.</td></tr>')
+                    + "</table>")
+        if later:
+            cal_html += (f'<details class="coll" data-k="cal"><summary>Next {CAL_DAYS_AHEAD} '
+                         f'days · {later_n} event{"" if later_n == 1 else "s"}</summary>'
+                         f'<table class="cal">{"".join(later)}</table></details>')
+        else:
+            cal_html += (f'<div class="cap">Nothing in the {CAL_DAYS_AHEAD} days after '
+                         f'today.</div>')
 
     # portfolio
     pf = d.get("portfolio")
@@ -2193,14 +2285,19 @@ def build_html(d):
                      f'data-basis="{tot_basis:.10f}">{pl_txt}</b></div>')
 
         head, bullets = pf_commentary(pf, cash)
-        note = (f'<div class="pfnote"><b>{head}</b>'
-                + ("<ul>" + "".join(f"<li>{x}</li>" for x in bullets) + "</ul>" if bullets else "")
-                + "</div>")
-        pf_html = ('<table class="pft"><tr><th>Ticker</th><th class="num">Qty</th>'
+        # Totals and the one-line read are always on show; the full table and the
+        # detail bullets sit behind a fold.
+        pf_html = (f'<div class="pfsum top">{summ}</div>'
+                   f'<div class="pfnote"><b>{head}</b></div>'
+                   f'<details class="coll" data-k="pf"><summary>All holdings · {len(pf)}'
+                   '</summary>'
+                   '<table class="pft"><tr><th>Ticker</th><th class="num">Qty</th>'
                    '<th class="num">Price</th><th class="num">Day</th>'
                    '<th class="num">Unreal. $</th><th class="num">%</th></tr>'
                    + "".join(body) + "</table>"
-                   + f'<div class="pfsum">{summ}</div>' + note
+                   + ('<div class="pfnote"><ul>' + "".join(f"<li>{x}</li>" for x in bullets)
+                      + "</ul></div>" if bullets else "")
+                   + "</details>"
                    + ('<div class="cap">Crypto rows and the totals reprice live on every '
                       'open; everything else is from the build.</div>' if has_crypto else ""))
 
@@ -2267,7 +2364,7 @@ def build_html(d):
     al = d.get("alerts") or []
     _alerts = ('<div class="note"><b>Outlook</b><ul>'
                + "".join(f"<li>{esc(x)}</li>" for x in al) + "</ul></div>") if al else ""
-    wx_note = ('<details class="coll"><summary>Next 5 days &amp; outlook</summary>'
+    wx_note = ('<details class="coll" data-k="wx"><summary>Next 5 days &amp; outlook</summary>'
                + wx_more + _alerts + "</details>") if (wx_more or _alerts) else ""
 
     def due_cap(block):
@@ -2390,11 +2487,13 @@ def build_html(d):
    <div class="gauge" id="gauge-cr">{gauge_svg(g_cr['score'], CR_ZONES)}
     <div class="val">{g_cr['label'].rsplit(": ", 1)[0]}: <span style="color:{zone_colour(g_cr['score'], CR_ZONES)}">{g_cr['status']}</span></div><div class="lab">{g_cr['sub']}</div></div>
   </div>
+  <details class="coll" data-k="risk"><summary>What the gauges imply</summary>
   <div class="impl">
    <div><h3>Equities \u2014 implications</h3><ul>{eq_bul}</ul></div>
    <div><h3>Crypto \u2014 implications</h3><ul id="cr-bullets">{cr_bul}</ul></div>
   </div>
   <div class="cap">General directional reads from the gauges \u2014 not financial advice.</div>
+  </details>
  </div>
 </div>
 """
@@ -2402,13 +2501,13 @@ def build_html(d):
     B["crypto_fx"] = f"""<div class="grid g2">
  <div class="card"><h2>\U0001FA99 Crypto</h2>
   {cr_main}
-  <details class="coll"><summary>Other coins</summary>{cr_rest}</details>
+  <details class="coll" data-k="coins"><summary>Other coins</summary>{cr_rest}</details>
   {cr_note}
   <div class="cap">Live on every open. Median of Coinbase, CoinGecko
   and Binance; a source more than 25% from the median is dropped and named under Src.</div></div>
  <div class="card"><h2>\U0001F4B1 FX \u2014 Philippine Peso</h2>
   {fx_main}
-  <details class="coll"><summary>Other currencies</summary>{fx_rest}</details>
+  <details class="coll" data-k="fx"><summary>Other currencies</summary>{fx_rest}</details>
   <div class="cap">ECB reference fix {fx_asof}; moves are against
   the previous fix. Green means the peso strengthened.</div></div>
 </div>
@@ -2423,38 +2522,63 @@ def build_html(d):
     PH, US, JP, EU = ("\U0001F1F5\U0001F1ED", "\U0001F1FA\U0001F1F8",
                       "\U0001F1EF\U0001F1F5", "\U0001F1EA\U0001F1FA")
 
-    def ref_row(flag, label, value, note):
-        """Name in semibold, figure large and bold, commentary small and muted on its
-        own line. The flag already says the country, so a leading "PH "/"US " in the
-        label is dropped (on Windows the flag renders as those same two letters)."""
+    def move_html(key):
+        """Coloured last move for a rate or print, e.g. a red "▲ 25 bps"."""
+        mv = MOVES.get(key)
+        if not mv:
+            return ""
+        amt, unit = mv
+        if not amt:
+            return '<span class="muted">unchanged</span>'
+        good = (amt > 0) == (key in RISE_IS_GOOD)
+        return (f'<span class="{"up" if good else "down"}">'
+                f'{"▲" if amt > 0 else "▼"} {abs(amt):g}'
+                f'{"" if unit == "k" else " "}{unit}</span>')
+
+    def ref_chip(name, value, key):
+        """Same component as the Global Snapshot chips: name, figure, coloured move."""
+        return (f'<div class="chip"><div class="n">{esc(name)}</div>'
+                f'<div class="v">{esc(value)}</div>'
+                f'<div class="c">{move_html(key) or "&nbsp;"}</div></div>')
+
+    def ref_row(flag, key, label, value, note):
+        """Name in semibold, figure large and bold, then the coloured move and the
+        commentary small on their own line. The flag already says the country, so a
+        leading "PH "/"US " in the label is dropped (on Windows the flag renders as
+        those same two letters)."""
         for pre in ("PH ", "US "):
             if label.startswith(pre):
                 label = label[len(pre):]
         label = label[:1].upper() + label[1:]
+        mv = move_html(key)
         return (f'<tr><td class="rl"><span class="fl">{flag}</span>{esc(label)}</td>'
                 f'<td class="num"><div class="rv">{esc(value)}</div>'
-                f'<div class="rn">{esc(note)}</div></td></tr>')
+                + (f'<div class="rn rm">{mv}</div>' if mv else "")
+                + f'<div class="rn">{esc(note)}</div></td></tr>')
+
+    _cpi_v, _, _cpi_m = PRINTS["ph_cpi"][1].partition(" (")
+    _un = (((d.get("ph") or {}).get("unemployment") or {}).get("series") or [])
+    jobs_chip = (ref_chip(f"PH jobless · {mon(_un[-1][0])}", f"{_un[-1][1]:g}%", "ph_jobs")
+                 if _un else "")
 
     # Slow-moving figures: one always-visible summary line, detail folded beneath.
     # The fold opens itself, and the heading is badged, on a build where one changed.
     B["reference"] = f"""<div class="card solo"><h2>\U0001F3DB\ufe0f Rates &amp; PH indicators{' <span class="newdot">Updated</span>' if ref_changed else ''}</h2>
- <div class="refsum">
-  <div class="rs"><span>BSP</span><b>{RATES['bsp'][0]}</b></div>
-  <div class="rs"><span>Fed</span><b>{RATES['fed'][0]}</b></div>
-  <div class="rs"><span>PH CPI</span><b>{PRINTS['ph_cpi'][1]}</b></div>
- </div>
- <details class="coll"{' open' if ref_changed else ''}><summary>Policy rates, prints and charts</summary>
+ <div class="idx">{ref_chip("BSP rate", RATES['bsp'][0], "bsp")}{ref_chip("Fed funds", RATES['fed'][0], "fed")}{ref_chip("PH inflation" + (" \u00b7 " + _cpi_m.rstrip(")") if _cpi_m else ""), _cpi_v, "ph_cpi")}{jobs_chip}</div>
+ <div class="cap">Moves are the latest change in each figure. Red means dearer money, faster
+ inflation, more jobless or slower growth; green the reverse.</div>
+ <details class="coll"{' open' if ref_changed else ' data-k="ref"'}><summary>Policy rates, prints and charts</summary>
   <table class="reft">
    <tr><th colspan="2">Policy rates</th></tr>
-   {ref_row(PH, "BSP policy rate", *RATES['bsp'])}
-   {ref_row(US, "Fed funds rate", *RATES['fed'])}
-   {ref_row(JP, "BoJ policy rate", *RATES['boj'])}
-   {ref_row(EU, "ECB deposit rate", *RATES['ecb'])}
+   {ref_row(PH, "bsp", "BSP policy rate", *RATES['bsp'])}
+   {ref_row(US, "fed", "Fed funds rate", *RATES['fed'])}
+   {ref_row(JP, "boj", "BoJ policy rate", *RATES['boj'])}
+   {ref_row(EU, "ecb", "ECB deposit rate", *RATES['ecb'])}
    <tr><th colspan="2">Latest prints</th></tr>
-   {ref_row(PH, *PRINTS['ph_cpi'])}
-   {ref_row(PH, *PRINTS['ph_gdp'])}
-   {ref_row(US, *PRINTS['us_cpi'])}
-   {ref_row(US, *PRINTS['us_claims'])}
+   {ref_row(PH, "ph_cpi", *PRINTS['ph_cpi'])}
+   {ref_row(PH, "ph_gdp", *PRINTS['ph_gdp'])}
+   {ref_row(US, "us_cpi", *PRINTS['us_cpi'])}
+   {ref_row(US, "us_claims", *PRINTS['us_claims'])}
   </table>
   <div class="cap">Maintained by hand: policy rates and US prints in the builder config,
   PH inflation and jobs in ph_data.json.</div>
@@ -2600,6 +2724,17 @@ table.pft th,table.pft td{{padding:8px 4px;white-space:nowrap}}
 table.pft th{{font-size:10.5px;letter-spacing:.04em}}
 table.pft td{{font-size:13px}}
 .pfsum{{border-top:1px solid var(--line);margin-top:2px;padding-top:8px}}
+.pfsum.top{{border-top:none;margin-top:0;padding-top:0}}
+details.coll .pfnote{{margin-top:6px}}
+table.cal th{{padding-top:10px}} table.cal tr:first-child th{{padding-top:2px}}
+/* One scroller only. Inside the app shell the frame is as tall as the page and the
+   shell's own document scrolls, which is what gives native momentum on a phone. */
+html.embedded,html.embedded body{{overflow:hidden}}
+#ptr{{position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:9998;display:none;
+ background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:999px;
+ padding:6px 14px;font-size:12px;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,.25);
+ pointer-events:none;white-space:nowrap}}
+html.embedded #ptr{{position:absolute}}
 .pfrow{{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
  padding:4px 4px;font-size:13.5px;font-variant-numeric:tabular-nums}}
 .pfrow.pftot{{border-top:1px solid var(--line);margin-top:6px;padding-top:10px}}
@@ -2609,12 +2744,6 @@ table.pft td{{font-size:13px}}
 .changed ul.chg{{margin:0;padding-left:18px;font-size:13.5px;line-height:1.55}}
 .changed ul.chg li{{margin-bottom:2px}}
 .changed .chgsum{{margin-top:9px;padding-top:9px;border-top:1px solid var(--line);font-size:13px}}
-.refsum{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}}
-.refsum .rs{{background:var(--chip);border:1px solid var(--line);border-radius:10px;
- padding:8px 10px;min-width:0}}
-.refsum .rs span{{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;
- letter-spacing:.04em}}
-.refsum .rs b{{font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}}
 table.reft{{margin-top:6px}}
 table.reft th{{padding-top:12px;font-size:10.5px;letter-spacing:.06em}}
 table.reft td{{vertical-align:middle;padding:8px 4px}}
@@ -2622,6 +2751,7 @@ table.reft td{{vertical-align:middle;padding:8px 4px}}
 .reft .fl{{display:inline-block;min-width:1.7em;font-weight:400}}
 .reft .rv{{font-size:17px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums;
  white-space:nowrap}}
+.reft .rm{{font-weight:600;font-size:12.5px}}
 .reft .rn{{font-size:11.5px;color:var(--muted);line-height:1.35;margin-top:1px;
  text-wrap:balance}}
 .refcharts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:4px 22px}}
@@ -2642,11 +2772,10 @@ table.reft td{{vertical-align:middle;padding:8px 4px}}
 @media (max-width:480px){{
  body{{padding:12px}}
  .grid{{gap:12px;margin-bottom:12px}}
- .card{{padding:13px;overflow-x:auto}}
+ .card{{padding:13px;min-width:0}}
  .solo{{margin-bottom:12px}}
  table.pft th,table.pft td{{padding:7px 3px}}
  table.pft td{{font-size:12.5px}} table.pft th{{font-size:9.5px}}
- .refsum .rs{{padding:7px 8px}} .refsum .rs b{{font-size:13.5px}}
  h1{{font-size:19px}}
  .big{{font-size:26px}}
  table{{font-size:12.5px}}
