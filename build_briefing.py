@@ -93,11 +93,15 @@ def _gnews(query, region="US"):
 # Filipino athletes competing abroad. Edit this list as careers move on; the
 # generic terms after it catch anyone not named here.
 PH_ATHLETES = ["Alex Eala", "EJ Obiena", "Carlos Yulo", "Kai Sotto"]
+# Philippine teams and golfers. Same rule: edit freely.
+PH_SPORTS = ["Gilas Pilipinas", "Miguel Tabuena", "Bianca Pagdanganan", "Dottie Ardina",
+             "Rianne Malixi", "Yuka Saso"]
 
 # News, weighted by interest. Each category is a list of angles, and the tile takes
 # one headline from each angle in turn, so no single angle can fill the category.
 # To re-weight: reorder, add or delete an angle. A category with one angle simply
-# takes its top NEWS_PER_FEED headlines.
+# takes its top NEWS_PER_FEED headlines. An optional fourth item is a list of
+# (tag, url) fallbacks, used only when the angles cannot fill the category.
 FEEDS = [
     ("PH", "ph", [
         _gnews('Philippines (BSP OR "Bangko Sentral" OR economy OR peso OR inflation OR GDP)', "PH"),
@@ -117,12 +121,15 @@ FEEDS = [
     ]),
     ("Sports", "sp", [
         # Named kinds of event, so the feed returns stories rather than league-wide
-        # trackers and round-ups.
+        # trackers, round-ups and "how to watch" pages.
         _gnews('NBA (trade OR injury OR signs OR extension OR waived OR suspended '
-               'OR preseason OR "season opener")'),
+               'OR "season opener")'),
         _gnews('golf ("PGA Tour" OR LPGA OR "DP World Tour" OR "LIV Golf" OR "Ryder Cup" OR major)'),
-        _gnews(" OR ".join(f'"{n}"' for n in PH_ATHLETES)
-               + ' OR "Filipino athlete" OR "Filipina athlete" OR "Filipino Olympian"'),
+        _gnews(" OR ".join(f'"{n}"' for n in PH_ATHLETES + PH_SPORTS)
+               + ' OR "Filipino athlete" OR "Filipina athlete" OR "Filipino golfer"'),
+    ], [
+        ("Ent", _gnews('(film OR movie OR series OR album OR concert) '
+                       '("box office" OR premiere OR "release date" OR tour OR Netflix)')),
     ]),
 ]
 
@@ -1293,6 +1300,14 @@ _NEWS_JUNK = re.compile(
     r"\b(scores?|schedules?|standings|fixtures|box score|results|live (stream|blog|updates?)"
     r"|how to watch|where to watch|odds|picks|highlights|photos|gallery|quiz|horoscope"
     r"|podcast|newsletter|stock quote|price today)\b", re.I)
+# Viewing guides: where and when to watch, never what happened.
+_NEWS_GUIDE = re.compile(
+    r"\b(how|where|when) to (watch|stream|listen|buy)\b|\blive ?stream\b|\btv channel\b"
+    r"|\bstart time\b|\btip-?off time\b|\bbroadcast info\b|\bpromo code\b"
+    r"|\bbonus code\b", re.I)
+# Betting pages. Sports only: "odds of a rate cut" is a real markets headline.
+_NEWS_BETTING = re.compile(
+    r"\b(betting )?odds\b|\bbest bets?\b|\bpredictions?\b|\bprops?\b|\bparlay\b", re.I)
 _NEWS_STOP = set("a an the of to in on for and or at by with from as is are was were be "
                  "its it this that after over into amid says said new".split())
 
@@ -1302,7 +1317,7 @@ def _news_words(title):
             if len(w) > 2 and w not in _NEWS_STOP}
 
 
-def _news_ok(title, src="", max_chars=NEWS_MAX_CHARS):
+def _news_ok(title, src="", max_chars=NEWS_MAX_CHARS, sport=False):
     """A headline you can learn something from at a glance: a full clause, not a
     label, not a caption, not a round-up. Short titles and fixture/listing pages
     ("Scores & Schedule", "Eagles") fail; so do over-long ones."""
@@ -1311,7 +1326,9 @@ def _news_ok(title, src="", max_chars=NEWS_MAX_CHARS):
         return False
     if len(title) > max_chars or _NEWS_SOCIAL.search(src or ""):
         return False
-    if _NEWS_ROUNDUP.search(title):
+    if _NEWS_ROUNDUP.search(title) or _NEWS_GUIDE.search(title):
+        return False
+    if sport and _NEWS_BETTING.search(title):
         return False
     if _NEWS_JUNK.search(title) and len(words) < 11:
         return False
@@ -1326,7 +1343,7 @@ def _news_same(a, b):
     return len(a & b) / min(len(a), len(b)) >= 0.6
 
 
-def _news_candidates(url, max_chars=NEWS_MAX_CHARS):
+def _news_candidates(url, max_chars=NEWS_MAX_CHARS, sport=False):
     """Usable headlines from one feed, in the feed's own order."""
     r = get(url)
     if not r:
@@ -1348,7 +1365,7 @@ def _news_candidates(url, max_chars=NEWS_MAX_CHARS):
             t, src = [x.strip() for x in t.rsplit(" - ", 1)]
         # Drop a trailing site section such as " | Opinion".
         t = re.sub(r"\s+\|\s+[^|]{1,25}$", "", t).strip()
-        if not _news_ok(t, src, max_chars):
+        if not _news_ok(t, src, max_chars, sport):
             thin += 1
             continue
         out.append((t, src))
@@ -1357,32 +1374,43 @@ def _news_candidates(url, max_chars=NEWS_MAX_CHARS):
 
 def news():
     items, seen = [], []
-    skipped_dup = skipped_thin = 0
-    for name, tag, urls in FEEDS:
-        pools = []
-        for u in urls:
-            cands, thin = _news_candidates(
-                u, NEWS_MAX_CHARS_PH if tag == "ph" else NEWS_MAX_CHARS)
-            skipped_thin += thin
-            pools.append(cands)
+    skipped = {"dup": 0, "thin": 0}
+
+    def take(pool, name, tag):
+        """First headline in the pool that is not a repeat of one already shown."""
+        while pool:
+            t, src = pool.pop(0)
+            w = _news_words(t)
+            if any(_news_same(w, o) for o in seen):
+                skipped["dup"] += 1
+                continue
+            seen.append(w)
+            items.append({"tag": name, "cls": tag, "title": t, "src": src})
+            return True
+        return False
+
+    def load(url, tag):
+        cands, thin = _news_candidates(
+            url, NEWS_MAX_CHARS_PH if tag == "ph" else NEWS_MAX_CHARS, sport=(tag == "sp"))
+        skipped["thin"] += thin
+        return cands
+
+    for feed in FEEDS:
+        name, tag, urls = feed[0], feed[1], feed[2]
+        pools = [load(u, tag) for u in urls]
         # One headline per angle, in turn, until the category is full or all run dry.
         count = 0
         while count < NEWS_PER_FEED and any(pools):
             for pool in pools:
-                while pool:
-                    t, src = pool.pop(0)
-                    w = _news_words(t)
-                    if any(_news_same(w, o) for o in seen):
-                        skipped_dup += 1
-                        continue
-                    seen.append(w)
-                    items.append({"tag": name, "cls": tag, "title": t, "src": src})
+                if count < NEWS_PER_FEED and take(pool, name, tag):
                     count += 1
-                    break
-                if count >= NEWS_PER_FEED:
-                    break
-    print(f"  news: {len(items)} kept, {skipped_dup} duplicates and "
-          f"{skipped_thin} thin, long or round-up titles skipped")
+        # Still short: the fallbacks (fetched only now) make up the difference.
+        for fb_name, fb_url in (feed[3] if len(feed) > 3 else []):
+            pool = load(fb_url, tag) if count < NEWS_PER_FEED else []
+            while count < NEWS_PER_FEED and take(pool, fb_name, tag):
+                count += 1
+    print(f"  news: {len(items)} kept, {skipped['dup']} duplicates and "
+          f"{skipped['thin']} thin, long or round-up titles skipped")
     return items
 
 
@@ -2452,12 +2480,8 @@ def build_html(d):
                       f'{"up" if btc["chg"] >= 0 else "down"} {abs(btc["chg"]):.2f}% on the day.')
         cl.append(f'Breadth {len(ups)} of {len(rows_ok)} higher · best {best["sym"]} '
                   f'{best["chg"]:+.2f}%, worst {worst["sym"]} {worst["chg"]:+.2f}%.')
-        drop = [c["sym"] for c in (d["crypto"] or []) if c.get("dropped")]
-        if drop:
-            cl.append(f'{", ".join(drop)} priced on two sources — the third diverged by '
-                      f'more than 25% and was discarded.')
-    if d.get("cr") and "UNKNOWN" not in d["cr"]["label"]:
-        cl.append(f'Fear &amp; Greed {d["cr"]["status"]} ({d["cr"]["score"]:.0f}).')
+    # A dropped price source and the Fear & Greed reading are deliberately not
+    # repeated here: the Src column and the Risk Gauges tile already carry them.
     cr_note = ('<div class="note"><b>What moved</b><ul>'
                + "".join(f"<li>{x}</li>" for x in cl) + "</ul></div>") if cl else ""
 
