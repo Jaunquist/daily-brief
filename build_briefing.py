@@ -116,7 +116,10 @@ FEEDS = [
         _gnews("artificial intelligence"),
     ]),
     ("Sports", "sp", [
-        _gnews("NBA"),
+        # Named kinds of event, so the feed returns stories rather than league-wide
+        # trackers and round-ups.
+        _gnews('NBA (trade OR injury OR signs OR extension OR waived OR suspended '
+               'OR preseason OR "season opener")'),
         _gnews('golf ("PGA Tour" OR LPGA OR "DP World Tour" OR "LIV Golf" OR "Ryder Cup" OR major)'),
         _gnews(" OR ".join(f'"{n}"' for n in PH_ATHLETES)
                + ' OR "Filipino athlete" OR "Filipina athlete" OR "Filipino Olympian"'),
@@ -1271,6 +1274,19 @@ def snapshot_state(d):
 
 # -------------------------------------------------------------------- news
 NEWS_PER_FEED = 3
+# Longest headline shown. Anything longer is usually a caption or two sentences.
+# Local stories get more room, since place and agency names are part of the story.
+NEWS_MAX_CHARS = 100
+NEWS_MAX_CHARS_PH = 120
+# "Publishers" whose items are post captions, not headlines.
+_NEWS_SOCIAL = re.compile(r"facebook|youtube|instagram|tiktok|reddit|linkedin|threads|"
+                          r"^x$|twitter|x\.com", re.I)
+# Trackers, round-ups and explainers: a page about everything, with no single story.
+_NEWS_ROUNDUP = re.compile(
+    r"\bevery\b.{0,40}\b(deals?|trades?|signings?|moves?|picks?|teams?|games?)\b"
+    r"|\ball \d+ teams\b|\btrackers?\b|\bround-?ups?\b|\bpower rankings\b"
+    r"|\beverything (you need|to know)\b|\bwhat (you need )?to know\b"
+    r"|\b(full|complete) (list|guide)\b|\bmock draft\b", re.I)
 
 # Titles that are a page, not a story: fixtures, tickers, listings, live blogs.
 _NEWS_JUNK = re.compile(
@@ -1286,11 +1302,16 @@ def _news_words(title):
             if len(w) > 2 and w not in _NEWS_STOP}
 
 
-def _news_ok(title):
-    """A headline you can learn something from: a full clause, not a label.
-    Short titles and fixture/listing pages ("Scores & Schedule", "Eagles") fail."""
+def _news_ok(title, src="", max_chars=NEWS_MAX_CHARS):
+    """A headline you can learn something from at a glance: a full clause, not a
+    label, not a caption, not a round-up. Short titles and fixture/listing pages
+    ("Scores & Schedule", "Eagles") fail; so do over-long ones."""
     words = title.split()
     if len(words) < 6 or len(title) < 35:
+        return False
+    if len(title) > max_chars or _NEWS_SOCIAL.search(src or ""):
+        return False
+    if _NEWS_ROUNDUP.search(title):
         return False
     if _NEWS_JUNK.search(title) and len(words) < 11:
         return False
@@ -1305,7 +1326,7 @@ def _news_same(a, b):
     return len(a & b) / min(len(a), len(b)) >= 0.6
 
 
-def _news_candidates(url):
+def _news_candidates(url, max_chars=NEWS_MAX_CHARS):
     """Usable headlines from one feed, in the feed's own order."""
     r = get(url)
     if not r:
@@ -1325,7 +1346,9 @@ def _news_candidates(url):
             t = t[: -len(src) - 3].strip()
         elif " - " in t:
             t, src = [x.strip() for x in t.rsplit(" - ", 1)]
-        if not _news_ok(t):
+        # Drop a trailing site section such as " | Opinion".
+        t = re.sub(r"\s+\|\s+[^|]{1,25}$", "", t).strip()
+        if not _news_ok(t, src, max_chars):
             thin += 1
             continue
         out.append((t, src))
@@ -1338,7 +1361,8 @@ def news():
     for name, tag, urls in FEEDS:
         pools = []
         for u in urls:
-            cands, thin = _news_candidates(u)
+            cands, thin = _news_candidates(
+                u, NEWS_MAX_CHARS_PH if tag == "ph" else NEWS_MAX_CHARS)
             skipped_thin += thin
             pools.append(cands)
         # One headline per angle, in turn, until the category is full or all run dry.
@@ -1358,7 +1382,7 @@ def news():
                 if count >= NEWS_PER_FEED:
                     break
     print(f"  news: {len(items)} kept, {skipped_dup} duplicates and "
-          f"{skipped_thin} thin titles skipped")
+          f"{skipped_thin} thin, long or round-up titles skipped")
     return items
 
 
