@@ -1018,15 +1018,12 @@ def portfolio(crypto_rows):
     return rows
 
 
-def us_session_label():
-    """Which US session the prices belong to, e.g. "Thursday 8 October's close", or
-    None while the session is open. Weekends are stepped over; US market holidays
-    are not known here, so on a holiday this names the holiday itself."""
-    try:
-        from zoneinfo import ZoneInfo
-        ny = NOW.astimezone(ZoneInfo("America/New_York"))
-    except Exception:
-        return "the last US close"
+def us_session_date():
+    """The US session the prices belong to, as a date, or None while it is open.
+    Weekends are stepped over; US market holidays are not known here, so on a
+    holiday this returns the holiday itself."""
+    from zoneinfo import ZoneInfo
+    ny = NOW.astimezone(ZoneInfo("America/New_York"))
     mins, day = ny.hour * 60 + ny.minute, ny.date()
     if ny.weekday() < 5 and 570 <= mins < 960:
         return None
@@ -1034,7 +1031,166 @@ def us_session_label():
         day -= dt.timedelta(days=1)
     while day.weekday() >= 5:
         day -= dt.timedelta(days=1)
-    return day.strftime("%A %-d %B") + "\u2019s close"
+    return day
+
+
+def us_session_label():
+    """e.g. "Thursday 8 October's close", or None while the session is open."""
+    try:
+        day = us_session_date()
+    except Exception:
+        return "the last US close"
+    return day.strftime("%A %-d %B") + "\u2019s close" if day else None
+
+
+# ------------------------------------------------------- portfolio history
+# One small JSON record per US session: total value ("v") and unrealised P&L ("p").
+# It is kept ENCRYPTED in the gist beside the briefing (history.txt), never in
+# state.json or the log, because the repository is public.
+HISTORY_FILE = "history.txt"
+HISTORY_KEEP_DAYS = 400
+PF_PERIODS = [("1 day", None), ("1 week", 7), ("1 month", 30), ("3 months", 90)]
+
+
+def _yahoo_history(sym):
+    """{iso date: close} for about six months, or {}."""
+    r = get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=6mo&interval=1d")
+    try:
+        res = r.json()["chart"]["result"][0]
+        closes = res["indicators"]["quote"][0]["close"]
+        return {dt.datetime.fromtimestamp(t, dt.timezone.utc).date().isoformat(): float(c)
+                for t, c in zip(res["timestamp"], closes) if c}
+    except Exception:
+        return {}
+
+
+def _stooq_history(sym):
+    r = get(f"https://stooq.com/q/d/l/?s={sym.lower()}.us&i=d")
+    out = {}
+    try:
+        for line in r.text.strip().splitlines()[1:]:
+            p = line.split(",")
+            out[dt.date.fromisoformat(p[0]).isoformat()] = float(p[4])
+    except Exception:
+        return {}
+    return out
+
+
+def _coin_history(sym):
+    cid = CG_IDS.get(sym)
+    if not cid:
+        return {}
+    r = get(f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart"
+            "?vs_currency=usd&days=120&interval=daily")
+    try:
+        return {dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).date().isoformat(): float(px)
+                for ms, px in r.json()["prices"] if px}
+    except Exception:
+        return {}
+
+
+def history_backfill(hist, rows, cash):
+    """Fill the days before recording began with an ESTIMATE: today's quantities at
+    each past day's close. It ignores every buy and sell since, so it is marked
+    ("e": 1) and shown as approximate. All-or-nothing: with even one holding's prices
+    missing the totals would be wrong, so it is skipped and retried next build."""
+    priced = [h for h in rows if h.get("value")]
+    series = {}
+    for h in priced:
+        px = (_coin_history(h["sym"]) if h["kind"] == "crypto"
+              else (_yahoo_history(h["sym"]) or _stooq_history(h["sym"])))
+        if px:
+            series[h["sym"]] = px
+    if len(series) < len(priced) or not priced:
+        hist["backfill_tries"] = hist.get("backfill_tries", 0) + 1
+        print(f"  history: past prices for {len(series)}/{len(priced)} holdings - "
+              "estimate skipped, will retry next build")
+        return
+    stocks = [h["sym"] for h in priced if h["kind"] != "crypto"]
+    # Trading days are the days every stock has a close; coins trade every day.
+    days = set.intersection(*(set(series[x]) for x in (stocks or series)))
+    basis_ok = all(h.get("basis") for h in priced)
+    basis = sum(h["basis"] for h in priced) if basis_ok else None
+    cutoff = (NOW.date() - dt.timedelta(days=100)).isoformat()
+    added = 0
+    for day in sorted(days):
+        if day < cutoff or day in hist["days"]:
+            continue
+        try:
+            mkt = sum(h["qty"] * series[h["sym"]][day] for h in priced)
+        except KeyError:
+            continue
+        hist["days"][day] = {"v": round(mkt + (cash or 0), 2),
+                             "p": round(mkt - basis, 2) if basis_ok else None, "e": 1}
+        added += 1
+    hist["backfilled"] = NOW.date().isoformat()
+    print(f"  history: estimated {added} past day(s) from today's holdings")
+
+
+def history_update(hist, rows, cash):
+    """Record this session, and estimate the past once. Returns the history dict."""
+    hist = hist if isinstance(hist, dict) and isinstance(hist.get("days"), dict) else {"days": {}}
+    if not rows:
+        return hist
+    priced = [h for h in rows if h.get("value")]
+    mkt = sum(h["value"] for h in priced)
+    basis_ok = bool(priced) and all(h.get("basis") for h in priced)
+    try:
+        sess = us_session_date()
+    except Exception:
+        sess = None
+    if sess and mkt:
+        hist["days"][sess.isoformat()] = {
+            "v": round(mkt + (cash or 0), 2),
+            "p": round(mkt - sum(h["basis"] for h in priced), 2) if basis_ok else None}
+    if not hist.get("backfilled") and hist.get("backfill_tries", 0) < 20:
+        history_backfill(hist, rows, cash)
+    floor = (NOW.date() - dt.timedelta(days=HISTORY_KEEP_DAYS)).isoformat()
+    hist["days"] = {k: v for k, v in hist["days"].items() if k >= floor}
+    est = sum(1 for v in hist["days"].values() if v.get("e"))
+    print(f"  history: {len(hist['days'])} day(s) on file, {est} estimated")
+    return hist
+
+
+def history_moves(hist, rows, cash):
+    """For each period: (label, value change %, P&L change $, estimated?)."""
+    days = (hist or {}).get("days") or {}
+    priced = [h for h in rows if h.get("value")]
+    mkt = sum(h["value"] for h in priced)
+    now_v = mkt + (cash or 0)
+    now_p = (mkt - sum(h["basis"] for h in priced)
+             if priced and all(h.get("basis") for h in priced) else None)
+    try:
+        today = us_session_date() or NOW.date()
+    except Exception:
+        today = NOW.date()
+    earlier = sorted(k for k in days if k < today.isoformat())
+    out = []
+    for label, back in PF_PERIODS:
+        ref = None
+        if back is None:
+            ref = earlier[-1] if earlier else None
+        else:
+            want = (today - dt.timedelta(days=back)).isoformat()
+            hits = [k for k in earlier if k <= want]
+            # A reference more than a week older than asked would mislabel the period.
+            if hits and hits[-1] >= (today - dt.timedelta(days=back + 7)).isoformat():
+                ref = hits[-1]
+        if not ref:
+            # No earlier day on file yet: the one-day figure can still come from the
+            # holdings' own day moves.
+            if back is None and priced and all(h.get("day") is not None for h in priced):
+                d1 = sum(h["value"] - h["value"] / (1 + h["day"] / 100) for h in priced)
+                prev_v = now_v - d1
+                out.append((label, d1 / prev_v * 100 if prev_v else None, d1, False))
+            else:
+                out.append((label, None, None, False))
+            continue
+        r = days[ref]
+        pct = (now_v - r["v"]) / r["v"] * 100 if r.get("v") else None
+        dpl = (now_p - r["p"]) if (now_p is not None and r.get("p") is not None) else None
+        out.append((label, pct, dpl, bool(r.get("e"))))
+    return out
 
 
 _NUMWORD = ["none", "one", "two", "three", "four", "five", "six", "seven", "eight",
@@ -2021,6 +2177,23 @@ function endPull(){ if(!pull) return; var go=pull.d>90; pull=null; ptr(null); if
 document.addEventListener('touchend',endPull,{passive:true});
 document.addEventListener('touchcancel',function(){ pull=null; if(ptrEl) ptr(null); },{passive:true});
 
+/* ---------- portfolio: Value / P&L switch, remembered ---------- */
+(function(){
+  var box=document.getElementById('pfh'); if(!box) return;
+  function set(m){
+    box.setAttribute('data-m',m);
+    Array.prototype.forEach.call(box.querySelectorAll('.seg button'),function(b){
+      b.className=b.getAttribute('data-m')===m?'on':''; });
+  }
+  try{ var m=localStorage.getItem('briefing-pf-metric'); if(m==='p'||m==='v') set(m); }catch(e){}
+  Array.prototype.forEach.call(box.querySelectorAll('.seg button'),function(b){
+    b.addEventListener('click',function(){
+      var m=b.getAttribute('data-m'); set(m);
+      try{ localStorage.setItem('briefing-pf-metric',m); }catch(e){}
+    });
+  });
+})();
+
 /* ---------- folds remember whether you left them open ---------- */
 Array.prototype.forEach.call(document.querySelectorAll('details[data-k]'),function(el){
   var key='briefing-fold-'+el.getAttribute('data-k');
@@ -2337,10 +2510,40 @@ def build_html(d):
                      f'data-basis="{tot_basis:.10f}">{pl_txt}</b></div>')
 
         head, bullets = pf_commentary(pf, cash)
+
+        def mv_cell(v, money_mode, est):
+            if v is None:
+                return '<span class="muted">\u2014</span>'
+            mark = "\u2248 " if est else ""
+            if abs(v) < (0.5 if money_mode else 0.05):
+                return f'<span class="muted">{mark}flat</span>'
+            txt = f"${abs(v):,.0f}" if money_mode else f"{abs(v):.1f}%"
+            return (f'<span class="{"up" if v > 0 else "down"}">{mark}'
+                    f'{"\u25b2" if v > 0 else "\u25bc"} {txt}</span>')
+
+        moves = history_moves(d.get("pf_hist"), pf, cash)
+        any_est = any(m[3] for m in moves)
+        any_gap = any(m[1] is None for m in moves)
+        hist_html = (
+            '<div class="pfh" id="pfh" data-m="v"><div class="pfhh"><span>Change over</span>'
+            '<span class="seg"><button type="button" data-m="v" class="on">Value</button>'
+            '<button type="button" data-m="p">P&amp;L</button></span></div>'
+            '<div class="pfchips">'
+            + "".join(f'<div class="chip"><div class="n">{lbl}</div>'
+                      f'<div class="c mv">{mv_cell(pct, False, est)}</div>'
+                      f'<div class="c mp">{mv_cell(dpl, True, est)}</div></div>'
+                      for lbl, pct, dpl, est in moves)
+            + '</div>'
+            + ('<div class="cap">'
+               + ("\u2248 is an estimate: today\u2019s holdings at that day\u2019s prices, "
+                  "ignoring buys and sells since. " if any_est else "")
+               + ("A dash means there is no history that far back yet. " if any_gap else "")
+               + "Value moves with deposits; P&amp;L does not.</div>")
+            + '</div>')
         # Totals and the one-line read are always on show; the full table and the
         # detail bullets sit behind a fold.
-        pf_html = (f'<div class="pfsum top">{summ}</div>'
-                   f'<div class="pfnote"><b>{head}</b></div>'
+        pf_html = (f'<div class="pfsum top">{summ}</div>' + hist_html
+                   + f'<div class="pfnote"><b>{head}</b></div>'
                    f'<details class="coll" data-k="pf"><summary>All holdings · {len(pf)}'
                    '</summary>'
                    '<table class="pft"><tr><th>Ticker</th><th class="num">Qty</th>'
@@ -2773,6 +2976,18 @@ table.pft th{{font-size:10.5px;letter-spacing:.04em}}
 table.pft td{{font-size:13px}}
 .pfsum{{border-top:1px solid var(--line);margin-top:2px;padding-top:8px}}
 .pfsum.top{{border-top:none;margin-top:0;padding-top:0}}
+.pfh{{margin-top:10px}}
+.pfhh{{display:flex;justify-content:space-between;align-items:center;font-size:12px;
+ color:var(--muted);padding:0 4px 6px}}
+.seg{{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden}}
+.seg button{{background:transparent;color:var(--muted);border:0;padding:4px 11px;font-size:11.5px;
+ font-weight:600;cursor:pointer}}
+.seg button.on{{background:var(--chip);color:var(--ink)}}
+.pfchips{{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}}
+.pfchips .chip{{background:var(--chip);border:1px solid var(--line);border-radius:10px;
+ padding:7px 6px;min-width:0;text-align:center}}
+.pfchips .chip .n{{font-size:11px}} .pfchips .chip .c{{font-size:12.5px;white-space:nowrap}}
+.pfh[data-m=v] .mp,.pfh[data-m=p] .mv{{display:none}}
 details.coll .pfnote{{margin-top:6px}}
 table.cal th{{padding-top:10px}} table.cal tr:first-child th{{padding-top:2px}}
 /* One scroller only. Inside the app shell the frame is as tall as the page and the
@@ -2880,6 +3095,51 @@ def shell_gist_id():
     return m.group(1)
 
 
+_GIST_CACHE = {}
+
+
+def gist_file(gist_id, token, name):
+    """Text of one file in the gist, or "". The gist is fetched once per build."""
+    if "j" not in _GIST_CACHE:
+        r = get(f"https://api.github.com/gists/{gist_id}",
+                headers={"Authorization": f"Bearer {token}",
+                         "Accept": "application/vnd.github+json"})
+        try:
+            _GIST_CACHE["j"] = r.json() if r else {}
+        except Exception:
+            _GIST_CACHE["j"] = {}
+    f = (_GIST_CACHE["j"].get("files") or {}).get(name)
+    if not f:
+        return ""
+    txt = f.get("content") or ""
+    if f.get("truncated") or not txt:
+        raw_r = get(f["raw_url"])
+        txt = raw_r.text if raw_r else ""
+    return txt.strip()
+
+
+def decrypt(payload_b64, passcode):
+    """Inverse of encrypt(): returns the text, or raises."""
+    raw = base64.b64decode(payload_b64)
+    salt, iv, ct = raw[:16], raw[16:28], raw[28:]
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600000)
+    return gzip.decompress(AESGCM(kdf.derive(passcode.encode("utf-8"))).decrypt(iv, ct, None)
+                           ).decode("utf-8")
+
+
+def history_load(gist_id, token, passcode):
+    txt = gist_file(gist_id, token, HISTORY_FILE)
+    if not txt:
+        return {"days": {}}
+    try:
+        return json.loads(decrypt(txt, passcode))
+    except Exception as e:
+        # Wrong key after a passcode change, or a damaged file: start again.
+        print(f"  ! portfolio history unreadable ({type(e).__name__}) - starting fresh",
+              file=sys.stderr)
+        return {"days": {}}
+
+
 def frozen_salt(gist_id, token):
     """Reuse the salt already in the gist's payload.
 
@@ -2897,24 +3157,15 @@ def frozen_salt(gist_id, token):
                 return b
         except ValueError:
             print("  ! BRIEF_SALT_HEX is not valid hex - ignoring", file=sys.stderr)
-    r = get(f"https://api.github.com/gists/{gist_id}",
-            headers={"Authorization": f"Bearer {token}",
-                     "Accept": "application/vnd.github+json"})
-    if r:
-        try:
-            f = r.json().get("files", {}).get("payload.txt")
-            if f:
-                txt = f.get("content") or ""
-                if f.get("truncated") or not txt:
-                    raw_r = get(f["raw_url"])
-                    txt = raw_r.text if raw_r else ""
-                if txt.strip():
-                    salt = base64.b64decode(txt.strip())[:16]
-                    if len(salt) == 16:
-                        print("  salt: reused from current payload")
-                        return salt
-        except Exception:
-            pass
+    try:
+        txt = gist_file(gist_id, token, "payload.txt")
+        if txt:
+            salt = base64.b64decode(txt)[:16]
+            if len(salt) == 16:
+                print("  salt: reused from current payload")
+                return salt
+    except Exception:
+        pass
     salt = os.urandom(16)
     print(f"  salt: generated fresh - pin it by setting BRIEF_SALT_HEX={salt.hex()}")
     return salt
@@ -2929,13 +3180,14 @@ def encrypt(plaintext_html, passcode, salt):
     return base64.b64encode(salt + iv + ct).decode("ascii")
 
 
-def push(payload_b64, gist_id, token):
+def push(payload_b64, gist_id, token, extra=None):
     r = requests.patch(
         f"https://api.github.com/gists/{gist_id}",
         headers={"Authorization": f"Bearer {token}",
                  "Accept": "application/vnd.github+json",
                  "X-GitHub-Api-Version": "2022-11-28"},
-        json={"files": {"payload.txt": {"content": payload_b64}}},
+        json={"files": {"payload.txt": {"content": payload_b64},
+                        **{k: {"content": v} for k, v in (extra or {}).items()}}},
         timeout=60)
     r.raise_for_status()
     return r.json().get("updated_at")
@@ -3000,13 +3252,21 @@ def main():
         sys.exit("Every source failed - refusing to overwrite the gist with an empty briefing.")
 
     save_state(snapshot_state(data))
+    hist = None
+    if data.get("portfolio"):
+        hist = history_update(history_load(gist_id, token, passcode),
+                              data["portfolio"], PF_META.get("cash"))
+        data["pf_hist"] = hist
     page = build_html(data)
     print(f"  html {len(page):,} bytes")
 
-    payload = encrypt(page, passcode, frozen_salt(gist_id, token))
+    salt = frozen_salt(gist_id, token)
+    payload = encrypt(page, passcode, salt)
+    extra = {HISTORY_FILE: encrypt(json.dumps(hist, sort_keys=True), passcode, salt)} \
+        if hist and hist.get("days") else None
     print(f"  payload {len(payload):,} base64 chars")
 
-    stamp = push(payload, gist_id, token)
+    stamp = push(payload, gist_id, token, extra)
     print(f"Pushed. Gist updated_at = {stamp}")
 
 
